@@ -10,7 +10,7 @@ const cookieName = '__Host-nissi-oauth';
 const cookie = (value, age=600) => `${cookieName}=${value}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${age}`;
 const headers = {'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Strict-Transport-Security':'max-age=31536000','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"};
 function send(res, code, content, extra={}) {res.writeHead(code, {...headers,'Content-Type':'text/html; charset=utf-8',...extra});res.end(content);}
-const page = body => `<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Casa Nissi · Bling</title><body style="font:16px system-ui;background:#f6f6f4;color:#222;margin:0"><main style="max-width:720px;margin:50px auto;padding:28px;background:white;border-top:6px solid #f4c925;border-radius:12px"><h1>Casa Nissi · Bling</h1>${body}</main></body></html>`;
+const page = body => `<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Casa Nissi · Bling</title><body style="font:16px system-ui;background:#f6f6f4;color:#222;margin:0"><main style="max-width:1200px;margin:50px auto;padding:28px;background:white;border-top:6px solid #f4c925;border-radius:12px"><h1>Casa Nissi · Bling</h1>${body}</main></body></html>`;
 export function vault(secret) {
   const key=Buffer.from(hkdfSync('sha256', secret, 'casa-nissi', 'bling-token-v1', 32));
   return {
@@ -35,6 +35,7 @@ export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={
   const crypto=vault(env.BLING_CLIENT_SECRET||randomBytes(32));
   const usedStates=new Map(),renewals=new Map();
   let sharedSession=null;
+  const dashboardCache=new Map();
   function packed(value){return Buffer.from(crypto.encrypt(value),'base64').toString('base64url');}
   function unpack(value){return crypto.decrypt(Buffer.from(value,'base64url').toString('base64'));}
   function oauthCookie(value){return cookie(packed(value));}
@@ -70,7 +71,7 @@ export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={
       const session=sharedSession&&sharedSession.sessionExpires>clock()?sharedSession:null;
       if(path==='/'&&req.method==='GET'){
         const csrf=nonce();
-        const content=session?'<h2>Bling conectado</h2><p><a href="/pedidos">Consultar pedidos reais</a> · <a href="/produtos">Consultar produtos reais</a></p><p>Os dados são consultados diretamente no Bling. O painel demonstrativo do GitHub permanece separado.</p>':'<h2>Conectar Casa Nissi</h2><p>Autorize a consulta de dados na conta Bling da Casa Nissi.</p><form method="post" action="/auth/bling/start"><input type="hidden" name="csrf" value="'+csrf+'"><button style="padding:14px;background:#f4c925;border:0;border-radius:6px">Conectar Bling</button></form>';
+        const content=session?'<h2>Bling conectado</h2><p><a href="/dashboard">Abrir dashboard</a> · <a href="/pedidos">Consultar pedidos reais</a> · <a href="/produtos">Consultar produtos reais</a></p><p>Os dados são consultados diretamente no Bling. O painel demonstrativo do GitHub permanece separado.</p>':'<h2>Conectar Casa Nissi</h2><p>Autorize a consulta de dados na conta Bling da Casa Nissi.</p><form method="post" action="/auth/bling/start"><input type="hidden" name="csrf" value="'+csrf+'"><button style="padding:14px;background:#f4c925;border:0;border-radius:6px">Conectar Bling</button></form>';
         return send(res,200,page(content+'<p style="font-size:13px;color:#666">Acesso por link, sem senha adicional. Qualquer pessoa com este endereço pode consultar os dados enquanto a conexão estiver ativa. Se o serviço reiniciar, abra este endereço no navegador em que autorizou o Bling para restaurar a sessão, ou autorize novamente.</p>'),{'Set-Cookie':oauthCookie({kind:'csrf',value:csrf,expires:clock()+600000})});
       }
       if(path==='/auth/bling/start'&&req.method==='POST'){
@@ -89,7 +90,51 @@ export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={
         if(url.searchParams.has('error')||!url.searchParams.get('code'))return send(res,400,page('<p>Autorização não concluída. <a href="/">Voltar</a></p>'),{'Set-Cookie':cookie('',0)});
         const tokens=await exchange({grant_type:'authorization_code',code:url.searchParams.get('code')});
         sharedSession=tokens;
-        return send(res,303,'',{'Location':'/','Set-Cookie':[cookie('',0),...tokenCookies(crypto,tokens)]});
+        return send(res,303,'',{'Location':'/dashboard','Set-Cookie':[cookie('',0),...tokenCookies(crypto,tokens)]});
+      }
+      if(path==='/dashboard'&&req.method==='GET'){
+        if(!session)return send(res,303,'',{'Location':'/'});
+        const days=Number(url.searchParams.get('dias')||30);
+        if(![1,7,30].includes(days))return send(res,400,page('<p>Período inválido.</p>'));
+        const current=await renew(session);sharedSession=current;
+        const currentDate=new Date(clock()).toLocaleDateString('en-CA',{timeZone:'America/Sao_Paulo'});
+        const first=new Date(currentDate+'T12:00:00Z');first.setUTCDate(first.getUTCDate()-days+1);
+        const start=first.toISOString().slice(0,10),key=hash(current.refresh_token)+':'+days+':'+currentDate;
+        let entry=dashboardCache.get(key);
+        if(!entry||clock()-entry.created>60000){
+          const promise=(async()=>{
+            const orders=[];let complete=false;
+            for(let pg=1;pg<=20;pg++){
+              if(pg>1)await new Promise(resolve=>setTimeout(resolve,400));
+              const query=new URLSearchParams({pagina:String(pg),limite:'100',dataInicial:start,dataFinal:currentDate});
+              const response=await fetcher('https://api.bling.com.br/Api/v3/pedidos/vendas?'+query,{headers:{Authorization:'Bearer '+current.access_token,Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(20000)});
+              if(!response.ok)throw Error('orders_unavailable');
+              const payload=await response.json();if(!Array.isArray(payload.data))throw Error('invalid_orders');
+              orders.push(...payload.data);if(payload.data.length<100){complete=true;break;}
+            }
+            return {orders:[...new Map(orders.map(o=>[String(o.id),o])).values()],complete,updated:clock()};
+          })();
+          entry={created:clock(),promise};dashboardCache.set(key,entry);
+          promise.catch(()=>dashboardCache.delete(key));
+          for(const [k,v] of dashboardCache)if(clock()-v.created>300000)dashboardCache.delete(k);
+        }
+        const result=await entry.promise,all=result.orders;
+        const loja=url.searchParams.get('loja')||'',search=(url.searchParams.get('busca')||'').toLowerCase().slice(0,100);
+        const orders=all.filter(o=>(!loja||String(o.loja?.id)===loja)&&(!search||String(o.numero||o.id).toLowerCase().includes(search)));
+        const sum=orders.reduce((a,o)=>a+(typeof o.total==='number'?o.total:0),0),known=orders.filter(o=>typeof o.total==='number').length;
+        const money=n=>n.toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+        const stores=[...new Set(all.map(o=>o.loja?.id).filter(v=>v!=null))];
+        const options=[1,7,30].map(v=>'<option value="'+v+'" '+(v===days?'selected':'')+'>'+(v===1?'Hoje':'Últimos '+v+' dias')+'</option>').join('');
+        const storeOptions=stores.map(v=>'<option value="'+escape(v)+'" '+(String(v)===loja?'selected':'')+'>Loja '+escape(v)+'</option>').join('');
+        const groups=new Map();for(const o of orders){const k=String(o.loja?.id??'Sem identificação');const group=groups.get(k)||{n:0,total:0};group.n++;group.total+=typeof o.total==='number'?o.total:0;groups.set(k,group);}
+        const summary=[...groups].map(([k,v])=>'<tr><td>'+escape(k)+'</td><td>'+v.n+'</td><td>'+money(v.total)+'</td></tr>').join('');
+        const rows=orders.slice().sort((a,b)=>String(b.data).localeCompare(String(a.data))).slice(0,100).map(o=>'<tr><td>'+escape(o.numero||o.id)+'</td><td>'+escape(o.data||'—')+'</td><td>'+escape(o.loja?.id??'—')+'</td><td>'+escape(o.situacao?.id??'—')+'</td><td>'+(typeof o.total==='number'?money(o.total):'Indisponível')+'</td></tr>').join('');
+        const daily=Array.from({length:days},(_,i)=>{const d=new Date(start+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+i);const date=d.toISOString().slice(0,10);return {date,total:orders.filter(o=>o.data===date).reduce((a,o)=>a+(typeof o.total==='number'?o.total:0),0)};});
+        const max=Math.max(1,...daily.map(d=>d.total)),w=900/days;
+        const svg='<svg viewBox="0 0 900 190" role="img" aria-label="Valor total dos pedidos por dia" style="width:100%;height:190px">'+daily.map((d,i)=>'<rect fill="#3483fa" x="'+(i*w+2)+'" width="'+Math.max(1,w-4)+'" y="'+(180-d.total/max*160)+'" height="'+(d.total/max*160)+'"><title>'+d.date+': '+money(d.total)+'</title></rect>').join('')+'</svg>';
+        const metric=(label,value)=>'<article style="background:#f6f6f4;padding:20px;border-radius:10px"><div style="color:#555;font-size:13px">'+label+'</div><strong style="font-size:28px;display:block;margin-top:10px">'+value+'</strong></article>';
+        const content='<div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><div><h2>Dashboard de vendas</h2><p>Dados reais do Bling · Casa Nissi</p></div><p><a href="/dashboard?dias='+days+'">Atualizar</a> · <a href="/produtos">Produtos</a></p></div><p style="font-size:13px;color:#666">Atualização automática a cada 60 segundos · Última consulta: '+new Date(result.updated).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'})+'</p><form method="get" action="/dashboard" style="display:flex;gap:12px;flex-wrap:wrap;margin:24px 0"><label>Período <select name="dias">'+options+'</select></label><label>Canal (ID no Bling) <select name="loja"><option value="">Todos</option>'+storeOptions+'</select></label><label>Buscar pedido <input name="busca" value="'+escape(search)+'"></label><button>Aplicar filtros</button></form>'+(!result.complete?'<p style="background:#fff4cf;padding:12px">Consulta parcial: limite de 2.000 pedidos atingido. Os indicadores abaixo cobrem somente os registros carregados.</p>':'')+(known<orders.length?'<p>Há pedidos sem valor total disponível; eles não entram na soma.</p>':'')+'<section style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px">'+metric('Total dos pedidos',money(sum))+metric('Pedidos registrados',String(orders.length))+metric('Ticket médio dos pedidos',known?money(sum/known):'—')+'</section><p style="font-size:13px;color:#666">Valores conforme o total do pedido no Bling, podendo incluir frete e outras cobranças. Inclui as situações retornadas; não equivale a vendas pagas ou faturamento líquido.</p><section style="margin:30px 0"><h3>Pedidos por dia · valor total</h3>'+svg+'<div style="display:flex;justify-content:space-between;font-size:12px"><span>'+start+'</span><span>'+currentDate+'</span></div></section><h3>Resumo por canal (ID Bling)</h3><table style="width:100%;text-align:left;border-spacing:10px"><thead><tr><th>Canal</th><th>Pedidos</th><th>Total</th></tr></thead><tbody>'+summary+'</tbody></table><h3>Pedidos recentes</h3><p style="font-size:13px">Até 100 pedidos da seleção. Situações exibidas pelo ID retornado pelo Bling.</p><div style="overflow:auto"><table style="width:100%;text-align:left;border-spacing:10px"><thead><tr><th>Pedido</th><th>Data</th><th>Canal</th><th>Situação</th><th>Total</th></tr></thead><tbody>'+(rows||'<tr><td>Sem pedidos nesta seleção.</td></tr>')+'</tbody></table></div>';
+        return send(res,200,page(content).replace('<title>','<meta http-equiv="refresh" content="60"><title>'),browserSession?{'Set-Cookie':tokenCookies(crypto,current)}:{});
       }
       if(['/pedidos','/produtos','/test/bling'].includes(path)&&req.method==='GET'){
         if(!session)return send(res,303,'',{'Location':'/'});
