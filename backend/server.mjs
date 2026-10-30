@@ -1,3 +1,4 @@
+import { createAnalytics, renderAnalytics, shell } from './analytics.mjs';
 import { createServer } from 'node:http';
 import { createHash, createHmac, randomBytes, timingSafeEqual, createCipheriv, createDecipheriv, hkdfSync } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -28,7 +29,9 @@ function tokenCookies(crypto,value){
   const parts=Array.from({length:maxParts},(_,i)=>encoded.slice(i*3000,(i+1)*3000));
   return parts.map((p,i)=>`${sessionPrefix}${i}=${p}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${p?2592000:0}`);
 }
-export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={}){
+export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Date.now()}={}){
+  let apiQueue=Promise.resolve(),lastRequest=0;
+  function fetcher(...args){const task=apiQueue.then(async()=>{const delay=Math.max(0,380-(Date.now()-lastRequest));if(delay)await new Promise(r=>setTimeout(r,delay));lastRequest=Date.now();return transport(...args);});apiQueue=task.catch(()=>{});return task;}
   const base=env.APP_BASE_URL||'https://painel-mercado-livre-9hti.onrender.com';
   // The already-configured server-side client secret supplies key material.
   // Key derivation is domain-separated from the Bling credential itself.
@@ -36,6 +39,7 @@ export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={
   const usedStates=new Map(),pendingStates=new Map(),renewals=new Map();
   let sharedSession=null;
   const dashboardCache=new Map();
+  const analytics=createAnalytics({clock,request:async resource=>{if(!sharedSession)throw Error('not_connected');sharedSession=await renew(sharedSession);const response=await fetcher('https://api.bling.com.br/Api/v3/'+resource,{headers:{Authorization:'Bearer '+sharedSession.access_token,Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(20000)});if(!response.ok)throw Error('bling_read_failed');return response.json();}});
   function packed(value){return Buffer.from(crypto.encrypt(value),'base64').toString('base64url');}
   function unpack(value){return crypto.decrypt(Buffer.from(value,'base64url').toString('base64'));}
   function oauthCookie(value){return cookie(packed(value));}
@@ -64,7 +68,7 @@ export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={
       for(const [k,v] of pendingStates)if(v<=clock())pendingStates.delete(k);
       for(const [k,v] of renewals)if(v.until<=clock())renewals.delete(k);
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
-      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'0.3.2'}),{'Content-Type':'application/json'});
+      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'0.4.0'}),{'Content-Type':'application/json'});
       if(!['GET','POST'].includes(req.method))return send(res,405,'Método não permitido',{Allow:'GET, POST'});
       if(!env.BLING_CLIENT_ID||!env.BLING_CLIENT_SECRET)return send(res,503,page('<p>Configure BLING_CLIENT_ID e BLING_CLIENT_SECRET no Environment do Render.</p>'));
       const cookies=parseCookies(req),browserSession=readSession(cookies);
@@ -95,7 +99,15 @@ export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={
         if(url.searchParams.has('error')||!url.searchParams.get('code'))return send(res,400,page('<p>Autorização não concluída. <a href="/">Voltar</a></p>'),{'Set-Cookie':cookie('',0)});
         const tokens=await exchange({grant_type:'authorization_code',code:url.searchParams.get('code')});
         sharedSession=tokens;
+        analytics.reset();
         return send(res,303,'',{'Location':'/dashboard','Set-Cookie':[cookie('',0),...tokenCookies(crypto,tokens)]});
+      }
+      if(path==='/analises'&&req.method==='GET'){
+        if(!session)return send(res,303,'',{'Location':'/'});
+        const days=Number(url.searchParams.get('dias')||30);
+        if(![7,30,90].includes(days))return send(res,400,page('<p>Período inválido.</p>'));
+        sharedSession=await renew(session);
+        return send(res,200,renderAnalytics(analytics.get(days),url,clock()),browserSession?{'Set-Cookie':tokenCookies(crypto,sharedSession)}:{});
       }
       if(path==='/dashboard'&&req.method==='GET'){
         if(!session)return send(res,303,'',{'Location':'/'});
@@ -139,7 +151,7 @@ export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={
         const svg='<svg viewBox="0 0 900 190" role="img" aria-label="Valor total dos pedidos por dia" style="width:100%;height:190px">'+daily.map((d,i)=>'<rect fill="#3483fa" x="'+(i*w+2)+'" width="'+Math.max(1,w-4)+'" y="'+(180-d.total/max*160)+'" height="'+(d.total/max*160)+'"><title>'+d.date+': '+money(d.total)+'</title></rect>').join('')+'</svg>';
         const metric=(label,value)=>'<article style="background:#f6f6f4;padding:20px;border-radius:10px"><div style="color:#555;font-size:13px">'+label+'</div><strong style="font-size:28px;display:block;margin-top:10px">'+value+'</strong></article>';
         const content='<div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><div><h2>Dashboard de vendas</h2><p>Dados reais do Bling · Casa Nissi</p></div><p><a href="/dashboard?dias='+days+'">Atualizar</a> · <a href="/produtos">Produtos</a></p></div><p style="font-size:13px;color:#666">Atualização automática a cada 60 segundos · Última consulta: '+new Date(result.updated).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'})+'</p><form method="get" action="/dashboard" style="display:flex;gap:12px;flex-wrap:wrap;margin:24px 0"><label>Período <select name="dias">'+options+'</select></label><label>Canal (ID no Bling) <select name="loja"><option value="">Todos</option>'+storeOptions+'</select></label><label>Buscar pedido <input name="busca" value="'+escape(search)+'"></label><button>Aplicar filtros</button></form>'+(!result.complete?'<p style="background:#fff4cf;padding:12px">Consulta parcial: limite de 2.000 pedidos atingido. Os indicadores abaixo cobrem somente os registros carregados.</p>':'')+(known<orders.length?'<p>Há pedidos sem valor total disponível; eles não entram na soma.</p>':'')+'<section style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px">'+metric('Total dos pedidos',money(sum))+metric('Pedidos registrados',String(orders.length))+metric('Ticket médio dos pedidos',known?money(sum/known):'—')+'</section><p style="font-size:13px;color:#666">Valores conforme o total do pedido no Bling, podendo incluir frete e outras cobranças. Inclui as situações retornadas; não equivale a vendas pagas ou faturamento líquido.</p><section style="margin:30px 0"><h3>Pedidos por dia · valor total</h3>'+svg+'<div style="display:flex;justify-content:space-between;font-size:12px"><span>'+start+'</span><span>'+currentDate+'</span></div></section><h3>Resumo por canal (ID Bling)</h3><table style="width:100%;text-align:left;border-spacing:10px"><thead><tr><th>Canal</th><th>Pedidos</th><th>Total</th></tr></thead><tbody>'+summary+'</tbody></table><h3>Pedidos recentes</h3><p style="font-size:13px">Até 100 pedidos da seleção. Situações exibidas pelo ID retornado pelo Bling.</p><div style="overflow:auto"><table style="width:100%;text-align:left;border-spacing:10px"><thead><tr><th>Pedido</th><th>Data</th><th>Canal</th><th>Situação</th><th>Total</th></tr></thead><tbody>'+(rows||'<tr><td>Sem pedidos nesta seleção.</td></tr>')+'</tbody></table></div>';
-        return send(res,200,page(content).replace('<title>','<meta http-equiv="refresh" content="60"><title>'),browserSession?{'Set-Cookie':tokenCookies(crypto,current)}:{});
+        return send(res,200,shell('<nav style="margin-bottom:20px"><a class="button primary" href="/analises">Abrir análise por produto →</a></nav>'+content,{title:'Visão geral',active:'overview'}),browserSession?{'Set-Cookie':tokenCookies(crypto,current)}:{});
       }
       if(['/pedidos','/produtos','/test/bling'].includes(path)&&req.method==='GET'){
         if(!session)return send(res,303,'',{'Location':'/'});
@@ -166,5 +178,6 @@ export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={
     }
   };
 }
-if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){createServer(createApp()).listen(Number(process.env.PORT||3000),'0.0.0.0',()=>console.log('Servidor disponível · sessão Bling 0.3.2'));}
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){createServer(createApp()).listen(Number(process.env.PORT||3000),'0.0.0.0',()=>console.log('Servidor disponível · análises Bling 0.4.0'));}
+
 
