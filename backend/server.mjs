@@ -19,107 +19,102 @@ export function vault(secret) {
   };
 }
 
-export async function postgresStore(url) {
-  const {default:pg}=await import('pg');
-  const pool=new pg.Pool({connectionString:url,max:3,connectionTimeoutMillis:10000,idleTimeoutMillis:10000});
-  // Do not print database errors: they may contain connection details.
-  pool.on('error',()=>{});
-  await pool.query('CREATE TABLE IF NOT EXISTS nissi_bling_tokens (id integer PRIMARY KEY CHECK(id=1), payload text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now())');
-  await pool.query('CREATE TABLE IF NOT EXISTS nissi_bling_oauth (digest text PRIMARY KEY, expires_at timestamptz NOT NULL)');
-  return {
-    async saveState(digest) {await pool.query('DELETE FROM nissi_bling_oauth WHERE expires_at < now()');await pool.query("INSERT INTO nissi_bling_oauth(digest,expires_at) VALUES($1,now()+interval '10 minutes')",[digest]);},
-    async consumeState(digest) {return (await pool.query('DELETE FROM nissi_bling_oauth WHERE digest=$1 AND expires_at>now() RETURNING digest',[digest])).rowCount===1;},
-    async read() {return (await pool.query('SELECT payload FROM nissi_bling_tokens WHERE id=1')).rows[0]?.payload;},
-    // Serialize token renewal across processes, so a refresh token is used once.
-    async locked(fn) {const c=await pool.connect();try{await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(84201927)');const existing=(await c.query('SELECT payload FROM nissi_bling_tokens WHERE id=1')).rows[0]?.payload;const result=await fn(existing);if(result.payload)await c.query('INSERT INTO nissi_bling_tokens(id,payload) VALUES(1,$1) ON CONFLICT(id) DO UPDATE SET payload=$1,updated_at=now()',[result.payload]);await c.query('COMMIT');return result.value;}catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}},
-    close:()=>pool.end()
-  };
+const sessionPrefix='__Host-nissi-session-';
+const maxParts=4;
+function parseCookies(req){return Object.fromEntries((req.headers.cookie||'').split(';').map(s=>{const at=s.indexOf('=');return at<0?['','']:[s.slice(0,at).trim(),s.slice(at+1).trim()];}));}
+function tokenCookies(crypto,value){
+  const encoded=Buffer.from(crypto.encrypt(value),'base64').toString('base64url');
+  if(encoded.length>12000)throw Error('session_too_large');
+  const parts=Array.from({length:maxParts},(_,i)=>encoded.slice(i*3000,(i+1)*3000));
+  return parts.map((p,i)=>`${sessionPrefix}${i}=${p}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${p?2592000:0}`);
 }
-
-export function createApp({env=process.env,store,fetcher=fetch,clock=()=>Date.now()}={}) {
-  const secret=env.APP_SECRET||'',password=env.PANEL_PASSWORD||'';
+export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={}){
   const base=env.APP_BASE_URL||'https://painel-mercado-livre-9hti.onrender.com';
-  const missing=[];
-  if(!env.BLING_CLIENT_ID)missing.push('BLING_CLIENT_ID');
-  if(!env.BLING_CLIENT_SECRET)missing.push('BLING_CLIENT_SECRET');
-  if(password.length<16)missing.push('PANEL_PASSWORD (mínimo 16 caracteres)');
-  if(secret.length<32)missing.push('APP_SECRET (mínimo 32 caracteres aleatórios)');
-  if(!store)missing.push('DATABASE_URL (banco PostgreSQL disponível)');
-  if(!/^https:\/\/[^/]+$/.test(base))missing.push('APP_BASE_URL (origem HTTPS sem barra final)');
-  const crypto=secret.length>=32?vault(secret):null;
-  const signature=s=>createHmac('sha256',secret).update('oauth:'+s).digest('base64url');
-  const sign=s=>s+'.'+signature(s);
-  const verify=s=>{if(!s)return null;const [value,sig,...rest]=s.split('.');return !rest.length&&sig&&equal(sig,signature(value))?value:null;};
-  let failures=0,windowStart=clock();
-  async function requestTokens(params) {
-    const response=await fetcher('https://api.bling.com.br/Api/v3/oauth/token',{method:'POST',headers:{Authorization:'Basic '+Buffer.from(env.BLING_CLIENT_ID+':'+env.BLING_CLIENT_SECRET).toString('base64'),'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:new URLSearchParams(params),signal:AbortSignal.timeout(20000),redirect:'error'});
+  // The already-configured server-side client secret supplies key material.
+  // Key derivation is domain-separated from the Bling credential itself.
+  const crypto=vault(env.BLING_CLIENT_SECRET||randomBytes(32));
+  const usedStates=new Map(),renewals=new Map();
+  let sharedSession=null;
+  function packed(value){return Buffer.from(crypto.encrypt(value),'base64').toString('base64url');}
+  function unpack(value){return crypto.decrypt(Buffer.from(value,'base64url').toString('base64'));}
+  function oauthCookie(value){return cookie(packed(value));}
+  function readSession(cookies){try{const value=unpack(Array.from({length:maxParts},(_,i)=>cookies[sessionPrefix+i]||'').join(''));return value.kind==='bling-session'&&value.sessionExpires>clock()&&typeof value.access_token==='string'&&typeof value.refresh_token==='string'?value:null;}catch{return null;}}
+  function readState(cookies,kind){try{const value=unpack(cookies[cookieName]||'');return value.kind===kind&&value.expires>clock()?value:null;}catch{return null;}}
+  async function exchange(params){
+    const response=await fetcher('https://api.bling.com.br/Api/v3/oauth/token',{method:'POST',headers:{Authorization:'Basic '+Buffer.from(env.BLING_CLIENT_ID+':'+env.BLING_CLIENT_SECRET).toString('base64'),'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:new URLSearchParams(params),redirect:'error',signal:AbortSignal.timeout(20000)});
     if(!response.ok)throw Error('token_exchange_failed');
     const data=await response.json();
-    if(typeof data.access_token!=='string'||typeof data.refresh_token!=='string'||!Number.isFinite(Number(data.expires_in))||Number(data.expires_in)<=0)throw Error('invalid_token_response');
-    return {access_token:data.access_token,refresh_token:data.refresh_token,expiresAt:clock()+Number(data.expires_in)*1000};
+    if(typeof data.access_token!=='string'||typeof data.refresh_token!=='string'||!(Number(data.expires_in)>0))throw Error('invalid_tokens');
+    return {kind:'bling-session',access_token:data.access_token,refresh_token:data.refresh_token,expiresAt:clock()+Number(data.expires_in)*1000,sessionExpires:clock()+30*86400000};
   }
-  async function accessToken() {
-    return store.locked(async payload=>{if(!payload)throw Error('not_connected');let tokens=crypto.decrypt(payload);if(tokens.expiresAt>clock()+60000)return {value:tokens.access_token};tokens=await requestTokens({grant_type:'refresh_token',refresh_token:tokens.refresh_token});return {payload:crypto.encrypt(tokens),value:tokens.access_token};});
+  async function renew(session){
+    const key=hash(session.refresh_token),cached=renewals.get(key);
+    if(cached&&cached.until>clock())return cached.promise;
+    if(session.expiresAt>clock()+60000)return session;
+    // A short-lived single-flight cache avoids concurrent refresh-token rotation
+    // for multiple requests from one browser, including requests with old cookies.
+    const promise=exchange({grant_type:'refresh_token',refresh_token:session.refresh_token});
+    renewals.set(key,{promise,until:clock()+60000});
+    try{return await promise;}catch(e){renewals.delete(key);throw e;}
   }
-  function auth(req,res) {
-    if(password.length<16){send(res,503,page('<p>Configure PANEL_PASSWORD no Environment do Render (mínimo 16 caracteres).</p>'));return false;}
-    if(clock()-windowStart>60000){failures=0;windowStart=clock();}
-    let supplied='';const value=req.headers.authorization||'';
-    if(value.startsWith('Basic '))supplied=Buffer.from(value.slice(6),'base64').toString('utf8');
-    if(!equal(supplied,'casa-nissi:'+password)){failures++;send(res,failures>30?429:401,page('<p>Acesso restrito. Utilize o usuário casa-nissi e a senha configurada no Render.</p>'),failures>30?{'Retry-After':'60'}:{'WWW-Authenticate':'Basic realm="Casa Nissi", charset="UTF-8"'});return false;}
-    return true;
-  }
-  async function handler(req,res) {
-    try {
+  return async function handler(req,res){
+    try{
+      for(const [k,v] of usedStates)if(v<=clock())usedStates.delete(k);
+      for(const [k,v] of renewals)if(v.until<=clock())renewals.delete(k);
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
-      if(path==='/health'&&(req.method==='GET'||req.method==='HEAD'))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok'}),{'Content-Type':'application/json'});
+      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'0.3.0'}),{'Content-Type':'application/json'});
       if(!['GET','POST'].includes(req.method))return send(res,405,'Método não permitido',{Allow:'GET, POST'});
-      // Callback authenticates with an expiring, signed, browser-bound OAuth cookie,
-      // not Basic credentials, which may be omitted after the cross-site redirect.
-      if(path!=='/auth/bling/callback'&&!auth(req,res))return;
-      if(missing.length)return send(res,503,page('<h2>Configuração pendente</h2><ul>'+missing.map(x=>'<li>'+escape(x)+'</li>').join('')+'</ul><p>Nenhuma autorização será processada até concluir a configuração.</p>'));
-      const cookies=Object.fromEntries((req.headers.cookie||'').split(';').map(s=>s.trim().split('=')));
-      const browser=verify(cookies[cookieName]);
-      if(path==='/auth/bling/callback'&&req.method==='GET') {
-        const state=url.searchParams.get('state');
-        if(!browser||!state||!equal(state,browser)||!await store.consumeState(hash(state)))return send(res,400,page('<p>Autorização inválida, expirada ou já utilizada. Volte ao início e tente novamente.</p>'),{'Set-Cookie':cookie('',0)});
-        if(url.searchParams.has('error')||!url.searchParams.get('code'))return send(res,400,page('<p>Autorização não concluída. <a href="/">Voltar</a></p>'),{'Set-Cookie':cookie('',0)});
-        // A fresh authorization never silently overwrites an existing connection.
-        await store.locked(async existing=>{if(existing)throw Error('already_connected');const tokens=await requestTokens({grant_type:'authorization_code',code:url.searchParams.get('code')});return {payload:crypto.encrypt(tokens),value:true};});
-        return send(res,303,'',{'Location':'/','Set-Cookie':cookie('',0)});
+      if(!env.BLING_CLIENT_ID||!env.BLING_CLIENT_SECRET)return send(res,503,page('<p>Configure BLING_CLIENT_ID e BLING_CLIENT_SECRET no Environment do Render.</p>'));
+      const cookies=parseCookies(req),browserSession=readSession(cookies);
+      if(!sharedSession&&browserSession)sharedSession=browserSession;
+      const session=sharedSession&&sharedSession.sessionExpires>clock()?sharedSession:null;
+      if(path==='/'&&req.method==='GET'){
+        const csrf=nonce();
+        const content=session?'<h2>Bling conectado</h2><p><a href="/pedidos">Consultar pedidos reais</a> · <a href="/produtos">Consultar produtos reais</a></p><p>Os dados são consultados diretamente no Bling. O painel demonstrativo do GitHub permanece separado.</p>':'<h2>Conectar Casa Nissi</h2><p>Autorize a consulta de dados na conta Bling da Casa Nissi.</p><form method="post" action="/auth/bling/start"><input type="hidden" name="csrf" value="'+csrf+'"><button style="padding:14px;background:#f4c925;border:0;border-radius:6px">Conectar Bling</button></form>';
+        return send(res,200,page(content+'<p style="font-size:13px;color:#666">Acesso por link, sem senha adicional. Qualquer pessoa com este endereço pode consultar os dados enquanto a conexão estiver ativa. Se o serviço reiniciar, abra este endereço no navegador em que autorizou o Bling para restaurar a sessão, ou autorize novamente.</p>'),{'Set-Cookie':oauthCookie({kind:'csrf',value:csrf,expires:clock()+600000})});
       }
-      if(path==='/'&&req.method==='GET') {
-        const connected=Boolean(await store.read()),state=nonce();
-        const form=connected?'<p>Autorização recebida e armazenada. A leitura de dados ainda precisa ser validada.</p><p><a href="/test/bling">Testar consulta de produtos</a></p>':'<p>Ao continuar, confira se está na conta Bling da Casa Nissi e se as permissões exibidas são somente de consulta.</p><form action="/auth/bling/start" method="post"><input type="hidden" name="csrf" value="'+state+'"><button style="padding:12px 20px;background:#f4c925;border:0;border-radius:6px">Autorizar Bling da Casa Nissi</button></form>';
-        return send(res,200,page('<h2>'+ (connected?'Bling autorizado':'Conectar Bling')+'</h2>'+form+'<p>O painel demonstrativo no GitHub permanece separado. Vendas reais não são publicadas nele.</p>'),{'Set-Cookie':cookie(sign(state))});
-      }
-      if(path==='/auth/bling/start'&&req.method==='POST') {
-        if(req.headers.origin!==base)return send(res,403,page('<p>Origem inválida.</p>'));
+      if(path==='/auth/bling/start'&&req.method==='POST'){
+        if(req.headers.origin!==base)return send(res,403,page('<p>Origem inválida. <a href="/">Voltar</a></p>'));
         let body='';for await(const chunk of req){body+=chunk;if(body.length>2048)return send(res,413,'Requisição muito grande');}
-        if(!browser||!equal(new URLSearchParams(body).get('csrf')||'',browser))return send(res,403,page('<p>Sessão inválida. Volte ao início.</p>'));
-        if(await store.read())return send(res,409,page('<p>Já existe uma autorização cadastrada.</p>'));
-        const state=nonce();await store.saveState(hash(state));
-        const target=new URL('https://www.bling.com.br/Api/v3/oauth/authorize');target.search=new URLSearchParams({response_type:'code',client_id:env.BLING_CLIENT_ID,state}).toString();
-        return send(res,303,'',{'Location':target.href,'Set-Cookie':cookie(sign(state))});
+        const csrf=readState(cookies,'csrf');
+        if(!csrf||!equal(csrf.value,new URLSearchParams(body).get('csrf')||''))return send(res,403,page('<p>Sessão expirada. <a href="/">Voltar</a></p>'));
+        const state=nonce(),target=new URL('https://www.bling.com.br/Api/v3/oauth/authorize');
+        target.search=new URLSearchParams({response_type:'code',client_id:env.BLING_CLIENT_ID,state}).toString();
+        return send(res,303,'',{'Location':target.href,'Set-Cookie':oauthCookie({kind:'oauth',value:state,expires:clock()+600000})});
       }
-      if(path==='/test/bling'&&req.method==='GET') {
-        const token=await accessToken();
-        const response=await fetcher('https://api.bling.com.br/Api/v3/produtos?pagina=1&limite=1',{headers:{Authorization:'Bearer '+token,Accept:'application/json'},signal:AbortSignal.timeout(20000),redirect:'error'});
-        if(!response.ok)throw Error('read_failed');
-        const data=await response.json();if(!Array.isArray(data.data))throw Error('invalid_read_response');
-        return send(res,200,page('<h2>Consulta confirmada</h2><p>O Bling respondeu à consulta de produtos. '+(data.data.length?'Foi encontrado pelo menos um produto.':'A primeira página está vazia.')+'</p><p>Nenhum registro foi alterado no Bling. A importação de vendas para o painel é a próxima etapa.</p><p><a href="/">Voltar</a></p>'));
+      if(path==='/auth/bling/callback'&&req.method==='GET'){
+        const bound=readState(cookies,'oauth'),state=url.searchParams.get('state')||'';
+        if(!bound||!equal(bound.value,state)||usedStates.has(hash(state)))return send(res,400,page('<p>Autorização inválida, expirada ou já utilizada. <a href="/">Tentar novamente</a></p>'),{'Set-Cookie':cookie('',0)});
+        usedStates.set(hash(state),clock()+600000);
+        if(url.searchParams.has('error')||!url.searchParams.get('code'))return send(res,400,page('<p>Autorização não concluída. <a href="/">Voltar</a></p>'),{'Set-Cookie':cookie('',0)});
+        const tokens=await exchange({grant_type:'authorization_code',code:url.searchParams.get('code')});
+        sharedSession=tokens;
+        return send(res,303,'',{'Location':'/','Set-Cookie':[cookie('',0),...tokenCookies(crypto,tokens)]});
+      }
+      if(['/pedidos','/produtos','/test/bling'].includes(path)&&req.method==='GET'){
+        if(!session)return send(res,303,'',{'Location':'/'});
+        const current=await renew(session),products=path!=='/pedidos';
+        sharedSession=current;
+        const n=Number(url.searchParams.get('pagina')||'1');
+        if(!Number.isSafeInteger(n)||n<1||n>10000)return send(res,400,page('<p>Página inválida.</p>'));
+        const resource=products?'produtos':'pedidos/vendas';
+        const response=await fetcher('https://api.bling.com.br/Api/v3/'+resource+'?'+new URLSearchParams({pagina:String(n),limite:'50'}),{headers:{Authorization:'Bearer '+current.access_token,Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(20000)});
+        // Persist rotated tokens even if the business-data request fails.
+        const extra=browserSession?{'Set-Cookie':tokenCookies(crypto,current)}:{};
+        if(!response.ok){const status=Number(response.status)||502;return send(res,status===401?401:502,page('<p>O Bling não liberou esta consulta (HTTP '+status+'). Confira as permissões do aplicativo; se necessário, autorize novamente.</p><p><a href="/">Voltar</a></p>'),extra);}
+        const data=await response.json();if(!Array.isArray(data.data))throw Error('invalid_response');
+        const heading=products?'Produtos cadastrados':'Pedidos registrados no Bling';
+        const th=products?'<th>Produto</th><th>SKU</th><th>Preço cadastrado</th>':'<th>Pedido</th><th>Data</th><th>Valor total do pedido</th><th>Situação (ID Bling)</th>';
+        const brl=v=>typeof v==='number'?v.toLocaleString('pt-BR',{style:'currency',currency:'BRL'}):'—';
+        const rows=data.data.map(p=>products?'<tr><td>'+escape(p.nome||'—')+'</td><td>'+escape(p.codigo||'—')+'</td><td>'+brl(p.preco)+'</td></tr>':'<tr><td>'+escape(p.numero||p.id||'—')+'</td><td>'+escape(p.data||'—')+'</td><td>'+brl(p.total)+'</td><td>'+escape(p.situacao?.id??'—')+'</td></tr>').join('');
+        const nav=(n>1?'<a href="?pagina='+(n-1)+'">Anterior</a> · ':'')+(data.data.length===50?'<a href="?pagina='+(n+1)+'">Próxima</a>':'');
+        return send(res,200,page('<p><a href="/">Início</a> · <a href="/pedidos">Pedidos</a> · <a href="/produtos">Produtos</a></p><h2>'+heading+'</h2><p>Dados reais · Página '+n+' · '+data.data.length+' registros nesta página.</p>'+(products?'':'<p>Esta é uma consulta de pedidos, incluindo as situações retornadas pelo Bling. O total pode incluir frete e outros valores; ainda não representa faturamento pago sem frete.</p>')+'<div style="overflow:auto"><table style="width:100%;text-align:left;border-spacing:12px"><thead><tr>'+th+'</tr></thead><tbody>'+(rows||'<tr><td>Nenhum registro nesta página.</td></tr>')+'</tbody></table></div><p>'+nav+'</p>'),extra);
       }
       return send(res,404,page('<p>Página não encontrada.</p>'));
-    } catch {
-      // Never echo exception messages, tokens, authorization codes or URLs.
-      return send(res,502,page('<p>Não foi possível concluir esta operação. A autorização pode precisar ser refeita ou o banco pode estar indisponível. Nenhuma chave será exibida aqui.</p><p><a href="/">Voltar</a></p>'));
+    }catch{
+      return send(res,502,page('<p>Não foi possível concluir a consulta ou autorização. <a href="/">Volte ao início</a> e tente novamente. Se persistir, informe apenas esta mensagem; não compartilhe códigos nem chaves.</p>'));
     }
-  }
-  return handler;
+  };
 }
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){createServer(createApp()).listen(Number(process.env.PORT||3000),'0.0.0.0',()=>console.log('Servidor disponível · sessão Bling 0.3.0'));}
 
-if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
-  let store;
-  if(process.env.DATABASE_URL){try{store=await postgresStore(process.env.DATABASE_URL);}catch{console.error('Banco indisponível. Verifique a configuração no Render.');}}
-  createServer(createApp({store})).listen(Number(process.env.PORT||3000),'0.0.0.0',()=>console.log('Servidor disponível'));
-}
