@@ -46,11 +46,11 @@ export function createAnalytics({request,clock=()=>Date.now()}){
     const key=String(o.id);let cached=details.get(key);
     if(!cached||clock()-cached.updated>300000){
      try{const result=await request('pedidos/vendas/'+encodeURIComponent(key));if(!result.data||!Array.isArray(result.data.itens))throw Error('missing_items');cached={order:normalize(result.data),updated:clock()};details.set(key,cached);}
-     catch{job.failed++;job.processed++;continue;}
+     catch{job.failed++;job.processed++;if(job.failed>=5){job.error=true;job.phase='Consulta interrompida após falhas no Bling. Os dados abaixo são parciais.';break;}continue;}
     }
     job.orders.push(cached.order);job.processed++;
    }
-   job.phase=job.failed?'Carga concluída com pedidos indisponíveis':'Carga concluída';job.finished=true;
+   if(!job.error)job.phase=job.failed?'Carga concluída com pedidos indisponíveis':'Carga concluída';job.finished=true;
   }catch{job.error=true;job.phase='O Bling não concluiu a consulta. A carga será tentada novamente.';job.finished=true;}
   finally{job.updated=clock();active=null;}
  }
