@@ -75,7 +75,9 @@ export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={
         return send(res,200,page(content+'<p style="font-size:13px;color:#666">Acesso por link, sem senha adicional. Qualquer pessoa com este endereço pode consultar os dados enquanto a conexão estiver ativa. Se o serviço reiniciar, abra este endereço no navegador em que autorizou o Bling para restaurar a sessão, ou autorize novamente.</p>'),{'Set-Cookie':oauthCookie({kind:'csrf',value:csrf,expires:clock()+600000})});
       }
       if(path==='/auth/bling/start'&&req.method==='POST'){
-        if(req.headers.origin!==base)return send(res,403,page('<p>Origem inválida. <a href="/">Voltar</a></p>'));
+        // The encrypted browser-bound CSRF token below is authoritative. Render
+        // proxies/custom domains can change Origin; reject explicit cross-site requests.
+        if(req.headers['sec-fetch-site']==='cross-site')return send(res,403,page('<p>Abra a página de conexão diretamente e tente novamente.</p>'));
         let body='';for await(const chunk of req){body+=chunk;if(body.length>2048)return send(res,413,'Requisição muito grande');}
         const csrf=readState(cookies,'csrf');
         if(!csrf||!equal(csrf.value,new URLSearchParams(body).get('csrf')||''))return send(res,403,page('<p>Sessão expirada. <a href="/">Voltar</a></p>'));
