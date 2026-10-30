@@ -21,6 +21,8 @@ test('OAuth binds browser and rejects replay; real reads shared by URL',async()=
  const sessionCookies=done.headers.getSetCookie().filter(s=>s.startsWith('__Host-nissi-session-')).map(s=>s.split(';')[0]).join('; ');assert.ok(sessionCookies);assert.ok(!sessionCookies.includes('access-'));
  const products=await request('/produtos');assert.equal(products.status,200);assert.ok((await products.text()).includes('Produto &lt;seguro&gt;'));assert.equal(products.headers.get('set-cookie'),null);
  const orders=await request('/pedidos');assert.equal(orders.status,200);assert.ok((await orders.text()).includes('Pedidos registrados'));assert.equal(reads,2);
+ const dash=await request('/dashboard');assert.equal(dash.status,200);const dashboard=await dash.text();assert.ok(dashboard.includes('content="60"'));assert.ok(dashboard.includes('100,00'));assert.ok(dashboard.includes('Total dos pedidos'));assert.equal(reads,3);
+ await request('/dashboard');assert.equal(reads,3);
  now+=3600000;
  await Promise.all([request('/pedidos'),request('/produtos')]);assert.equal(exchanges,2);
  assert.equal((await request('/pedidos?pagina=NaN')).status,400);
