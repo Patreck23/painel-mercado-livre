@@ -12,8 +12,8 @@ test('OAuth binds browser and rejects replay; real reads shared by URL',async()=
  try{
  assert.equal((await request('/pedidos')).status,303);assert.equal(reads,0);
  const home=await request('/');assert.equal(home.status,200);const homeCookie=home.headers.get('set-cookie').split(';')[0],csrf=(await home.text()).match(/name="csrf" value="([^"]+)/)[1];
- assert.equal((await request('/auth/bling/start',{method:'POST',headers:{Origin:'https://evil.com',Cookie:homeCookie},body:'csrf='+csrf})).status,403);
- const start=await request('/auth/bling/start',{method:'POST',headers:{Origin:env.APP_BASE_URL,Cookie:homeCookie},body:'csrf='+csrf});assert.equal(start.status,303);
+ assert.equal((await request('/auth/bling/start',{method:'POST',headers:{Origin:'https://evil.com','Sec-Fetch-Site':'cross-site',Cookie:homeCookie},body:'csrf='+csrf})).status,403);
+ const start=await request('/auth/bling/start',{method:'POST',headers:{Origin:'https://alternate-render-domain.example','Sec-Fetch-Site':'same-origin',Cookie:homeCookie},body:'csrf='+csrf});assert.equal(start.status,303);
  const state=new URL(start.headers.get('location')).searchParams.get('state'),bound=start.headers.get('set-cookie').split(';')[0],callback='/auth/bling/callback?state='+state+'&code=test';
  assert.equal((await request(callback)).status,400);assert.equal(exchanges,0);
  const done=await request(callback,{headers:{Cookie:bound}});assert.equal(done.status,303);assert.equal(exchanges,1);
