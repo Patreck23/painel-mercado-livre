@@ -11,7 +11,7 @@ test('OAuth works without cookies and rejects invalid state and replay',async()=
  const base='http://127.0.0.1:'+server.address().port,request=(path,opts={})=>fetch(base+path,{...opts,redirect:'manual'});
  try{
  assert.equal((await request('/pedidos')).status,303);assert.equal(reads,0);
- const home=await request('/');assert.equal(home.status,200);const homeCookie=home.headers.get('set-cookie').split(';')[0],csrf=(await home.text()).match(/name="csrf" value="([^"]+)/)[1];
+ const home=await request('/');assert.equal(home.status,200);const homeCookie=home.headers.get('set-cookie').split(';')[0],csrf=(await home.text()).match(/ticket=([^"&]+)/)[1];
  assert.equal((await request('/auth/bling/start',{method:'POST',headers:{Origin:'https://evil.com','Sec-Fetch-Site':'cross-site',Cookie:''},body:'csrf='+csrf})).status,403);
  const start=await request('/auth/bling/start',{method:'POST',headers:{Origin:'https://alternate-render-domain.example','Sec-Fetch-Site':'same-origin',Cookie:homeCookie},body:'csrf='+csrf});assert.equal(start.status,303);
  const state=new URL(start.headers.get('location')).searchParams.get('state'),bound=start.headers.get('set-cookie').split(';')[0],callback='/auth/bling/callback?state='+state+'&code=test';
