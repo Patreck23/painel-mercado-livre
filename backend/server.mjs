@@ -33,7 +33,7 @@ export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={
   // The already-configured server-side client secret supplies key material.
   // Key derivation is domain-separated from the Bling credential itself.
   const crypto=vault(env.BLING_CLIENT_SECRET||randomBytes(32));
-  const usedStates=new Map(),renewals=new Map();
+  const usedStates=new Map(),pendingStates=new Map(),renewals=new Map();
   let sharedSession=null;
   const dashboardCache=new Map();
   function packed(value){return Buffer.from(crypto.encrypt(value),'base64').toString('base64url');}
@@ -61,16 +61,17 @@ export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={
   return async function handler(req,res){
     try{
       for(const [k,v] of usedStates)if(v<=clock())usedStates.delete(k);
+      for(const [k,v] of pendingStates)if(v<=clock())pendingStates.delete(k);
       for(const [k,v] of renewals)if(v.until<=clock())renewals.delete(k);
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
-      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'0.3.0'}),{'Content-Type':'application/json'});
+      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'0.3.1'}),{'Content-Type':'application/json'});
       if(!['GET','POST'].includes(req.method))return send(res,405,'Método não permitido',{Allow:'GET, POST'});
       if(!env.BLING_CLIENT_ID||!env.BLING_CLIENT_SECRET)return send(res,503,page('<p>Configure BLING_CLIENT_ID e BLING_CLIENT_SECRET no Environment do Render.</p>'));
       const cookies=parseCookies(req),browserSession=readSession(cookies);
       if(!sharedSession&&browserSession)sharedSession=browserSession;
       const session=sharedSession&&sharedSession.sessionExpires>clock()?sharedSession:null;
       if(path==='/'&&req.method==='GET'){
-        const csrf=nonce();
+        const csrf=packed({kind:'csrf',value:nonce(),expires:clock()+600000});
         const content=session?'<h2>Bling conectado</h2><p><a href="/dashboard">Abrir dashboard</a> · <a href="/pedidos">Consultar pedidos reais</a> · <a href="/produtos">Consultar produtos reais</a></p><p>Os dados são consultados diretamente no Bling. O painel demonstrativo do GitHub permanece separado.</p>':'<h2>Conectar Casa Nissi</h2><p>Autorize a consulta de dados na conta Bling da Casa Nissi.</p><form method="post" action="/auth/bling/start"><input type="hidden" name="csrf" value="'+csrf+'"><button style="padding:14px;background:#f4c925;border:0;border-radius:6px">Conectar Bling</button></form>';
         return send(res,200,page(content+'<p style="font-size:13px;color:#666">Acesso por link, sem senha adicional. Qualquer pessoa com este endereço pode consultar os dados enquanto a conexão estiver ativa. Se o serviço reiniciar, abra este endereço no navegador em que autorizou o Bling para restaurar a sessão, ou autorize novamente.</p>'),{'Set-Cookie':oauthCookie({kind:'csrf',value:csrf,expires:clock()+600000})});
       }
@@ -79,15 +80,17 @@ export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={
         // proxies/custom domains can change Origin; reject explicit cross-site requests.
         if(req.headers['sec-fetch-site']==='cross-site')return send(res,403,page('<p>Abra a página de conexão diretamente e tente novamente.</p>'));
         let body='';for await(const chunk of req){body+=chunk;if(body.length>2048)return send(res,413,'Requisição muito grande');}
-        const csrf=readState(cookies,'csrf');
-        if(!csrf||!equal(csrf.value,new URLSearchParams(body).get('csrf')||''))return send(res,403,page('<p>Sessão expirada. <a href="/">Voltar</a></p>'));
+        let csrf;try{csrf=unpack(new URLSearchParams(body).get('csrf')||'');}catch{}
+        if(!csrf||csrf.kind!=='csrf'||csrf.expires<=clock())return send(res,403,page('<p>Sessão expirada. <a href="/">Voltar</a></p>'));
         const state=nonce(),target=new URL('https://www.bling.com.br/Api/v3/oauth/authorize');
+        pendingStates.set(hash(state),clock()+600000);
         target.search=new URLSearchParams({response_type:'code',client_id:env.BLING_CLIENT_ID,state}).toString();
         return send(res,303,'',{'Location':target.href,'Set-Cookie':oauthCookie({kind:'oauth',value:state,expires:clock()+600000})});
       }
       if(path==='/auth/bling/callback'&&req.method==='GET'){
-        const bound=readState(cookies,'oauth'),state=url.searchParams.get('state')||'';
-        if(!bound||!equal(bound.value,state)||usedStates.has(hash(state)))return send(res,400,page('<p>Autorização inválida, expirada ou já utilizada. <a href="/">Tentar novamente</a></p>'),{'Set-Cookie':cookie('',0)});
+        const state=url.searchParams.get('state')||'',expires=pendingStates.get(hash(state));
+        if(!state||!expires||expires<=clock()||usedStates.has(hash(state)))return send(res,400,page('<p>Autorização inválida, expirada ou já utilizada. <a href="/">Tentar novamente</a></p>'),{'Set-Cookie':cookie('',0)});
+        pendingStates.delete(hash(state));
         usedStates.set(hash(state),clock()+600000);
         if(url.searchParams.has('error')||!url.searchParams.get('code'))return send(res,400,page('<p>Autorização não concluída. <a href="/">Voltar</a></p>'),{'Set-Cookie':cookie('',0)});
         const tokens=await exchange({grant_type:'authorization_code',code:url.searchParams.get('code')});
@@ -163,5 +166,5 @@ export function createApp({env=process.env,fetcher=fetch,clock=()=>Date.now()}={
     }
   };
 }
-if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){createServer(createApp()).listen(Number(process.env.PORT||3000),'0.0.0.0',()=>console.log('Servidor disponível · sessão Bling 0.3.0'));}
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){createServer(createApp()).listen(Number(process.env.PORT||3000),'0.0.0.0',()=>console.log('Servidor disponível · sessão Bling 0.3.1'));}
 
