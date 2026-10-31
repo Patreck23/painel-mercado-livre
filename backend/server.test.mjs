@@ -10,7 +10,7 @@ test('OAuth works without cookies and rejects invalid state and replay',async()=
  const handler=createApp({env,fetcher,clock:()=>now}),server=createServer(handler);await new Promise(r=>server.listen(0,'127.0.0.1',r));
  const base='http://127.0.0.1:'+server.address().port,request=(path,opts={})=>fetch(base+path,{...opts,redirect:'manual'});
  try{
- assert.equal((await request('/pedidos')).status,303);assert.equal(reads,0);
+ assert.equal((await request('/mercado-livre')).status,200);assert.equal((await request('/produtos')).status,303);assert.equal((await request('/pedidos')).status,303);assert.equal(reads,0);
  const home=await request('/');assert.equal(home.status,200);const homeCookie=home.headers.get('set-cookie').split(';')[0],csrf=(await home.text()).match(/ticket=([^"&]+)/)[1];
  assert.equal((await request('/auth/bling/start',{method:'POST',headers:{Origin:'https://evil.com','Sec-Fetch-Site':'cross-site',Cookie:''},body:'csrf='+csrf})).status,403);
  const start=await request('/auth/bling/start',{method:'POST',headers:{Origin:'https://alternate-render-domain.example','Sec-Fetch-Site':'same-origin',Cookie:homeCookie},body:'csrf='+csrf});assert.equal(start.status,303);
@@ -19,12 +19,12 @@ test('OAuth works without cookies and rejects invalid state and replay',async()=
  const done=await request(callback);assert.equal(done.status,303);assert.equal(exchanges,1);
  assert.equal((await request(callback,{headers:{Cookie:bound}})).status,400);
  const sessionCookies=done.headers.getSetCookie().filter(s=>s.startsWith('__Host-nissi-session-')).map(s=>s.split(';')[0]).join('; ');assert.ok(sessionCookies);assert.ok(!sessionCookies.includes('access-'));
- const products=await request('/produtos');assert.equal(products.status,200);assert.ok((await products.text()).includes('Produto &lt;seguro&gt;'));assert.equal(products.headers.get('set-cookie'),null);
+ const products=await request('/produtos?catalogo=1');assert.equal(products.status,200);assert.ok((await products.text()).includes('Produto &lt;seguro&gt;'));assert.equal(products.headers.get('set-cookie'),null);
  const orders=await request('/pedidos');assert.equal(orders.status,200);assert.ok((await orders.text()).includes('Pedidos registrados'));assert.equal(reads,2);
  const dash=await request('/dashboard');assert.equal(dash.status,200);const dashboard=await dash.text();assert.ok(dashboard.includes('content="60"'));assert.ok(dashboard.includes('100,00'));assert.ok(dashboard.includes('Total dos pedidos'));assert.equal(reads,3);
  await request('/dashboard');assert.equal(reads,3);
  now+=3600000;
- await Promise.all([request('/pedidos'),request('/produtos')]);assert.equal(exchanges,2);
+ await Promise.all([request('/pedidos'),request('/produtos?catalogo=1')]);assert.equal(exchanges,2);
  assert.equal((await request('/pedidos?pagina=NaN')).status,400);
  const restarted=createServer(createApp({env,fetcher,clock:()=>now}));await new Promise(r=>restarted.listen(0,'127.0.0.1',r));try{const origin='http://127.0.0.1:'+restarted.address().port;assert.equal((await fetch(origin+'/pedidos',{redirect:'manual'})).status,303);assert.equal((await fetch(origin+'/',{headers:{Cookie:sessionCookies}})).status,200);}finally{await new Promise(r=>restarted.close(r));}
  }finally{await new Promise(r=>server.close(r));}
