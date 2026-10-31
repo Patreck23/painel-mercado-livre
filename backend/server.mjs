@@ -44,7 +44,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
   async function blingRead(resource){
     if(!sharedSession)throw Error('not_connected');sharedSession=await renew(sharedSession);
     const response=await fetcher('https://api.bling.com.br/Api/v3/'+resource,{headers:{Authorization:'Bearer '+sharedSession.access_token,Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(20000)});
-    if(!response.ok)throw Error('bling_read_failed');return response.json();
+    if(!response.ok)throw Error('bling_read_failed_'+response.status);return response.json();
   }
   const cancellation=createCancellation({request:blingRead,clock,overrideIds:(env.BLING_CANCELLED_STATUS_IDS||'').split(',').map(s=>s.trim()).filter(Boolean)});
   const channelDirectory=createChannels({request:blingRead,clock});
@@ -57,7 +57,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
   function readState(cookies,kind){try{const value=unpack(cookies[cookieName]||'');return value.kind===kind&&value.expires>clock()?value:null;}catch{return null;}}
   async function exchange(params){
     const response=await fetcher('https://api.bling.com.br/Api/v3/oauth/token',{method:'POST',headers:{Authorization:'Basic '+Buffer.from(env.BLING_CLIENT_ID+':'+env.BLING_CLIENT_SECRET).toString('base64'),'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:new URLSearchParams(params),redirect:'error',signal:AbortSignal.timeout(20000)});
-    if(!response.ok)throw Error('token_exchange_failed');
+    if(!response.ok)throw Error('token_exchange_failed_'+response.status);
     const data=await response.json();
     if(typeof data.access_token!=='string'||typeof data.refresh_token!=='string'||!(Number(data.expires_in)>0))throw Error('invalid_tokens');
     return {kind:'bling-session',access_token:data.access_token,refresh_token:data.refresh_token,expiresAt:clock()+Number(data.expires_in)*1000,sessionExpires:clock()+30*86400000};
@@ -78,7 +78,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
       for(const [k,v] of pendingStates)if(v<=clock())pendingStates.delete(k);
       for(const [k,v] of renewals)if(v.until<=clock())renewals.delete(k);
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
-      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'0.5.0'}),{'Content-Type':'application/json'});
+      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'0.5.1'}),{'Content-Type':'application/json'});
       if(!['GET','POST'].includes(req.method))return send(res,405,'Método não permitido',{Allow:'GET, POST'});
       if(!env.BLING_CLIENT_ID||!env.BLING_CLIENT_SECRET)return send(res,503,page('<p>Configure BLING_CLIENT_ID e BLING_CLIENT_SECRET no Environment do Render.</p>'));
       const cookies=parseCookies(req),browserSession=readSession(cookies);
@@ -87,7 +87,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
       if(path==='/'&&req.method==='GET'){
         const csrf=packed({kind:'csrf',value:nonce(),expires:clock()+600000});
         const content=session?'<h2>Bling conectado</h2><p><a href="/dashboard">Abrir dashboard</a> · <a href="/pedidos">Consultar pedidos reais</a> · <a href="/produtos">Consultar produtos reais</a></p><p>Os dados são consultados diretamente no Bling. O painel demonstrativo do GitHub permanece separado.</p>':'<h2>Conectar Casa Nissi</h2><p>Autorize a consulta de dados na conta Bling da Casa Nissi.</p><p><a href="/auth/bling/start?ticket='+csrf+'" style="display:inline-block;padding:14px;background:#f4c925;color:#222;text-decoration:none;border-radius:6px">Conectar Bling</a></p>';
-        return send(res,200,page(content+'<p style="font-size:13px;color:#666">Acesso por link, sem senha adicional. Qualquer pessoa com este endereço pode consultar os dados enquanto a conexão estiver ativa. Se o serviço reiniciar, abra este endereço no navegador em que autorizou o Bling para restaurar a sessão, ou autorize novamente.</p>'),{'Set-Cookie':oauthCookie({kind:'csrf',value:csrf,expires:clock()+600000})});
+        return send(res,200,page(content+'<p><a href="/auth/bling/start?ticket='+csrf+'">Renovar conexão com o Bling</a></p><p style="font-size:13px;color:#666">Acesso por link, sem senha adicional. Qualquer pessoa com este endereço pode consultar os dados enquanto a conexão estiver ativa. Se o serviço reiniciar, abra este endereço no navegador em que autorizou o Bling para restaurar a sessão, ou autorize novamente.</p>'),{'Set-Cookie':oauthCookie({kind:'csrf',value:csrf,expires:clock()+600000})});
       }
       if(path==='/auth/bling/start'&&['GET','POST'].includes(req.method)){
         // The encrypted browser-bound CSRF token below is authoritative. Render
@@ -143,7 +143,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
               if(pg>1)await new Promise(resolve=>setTimeout(resolve,400));
               const query=new URLSearchParams({pagina:String(pg),limite:'100',dataInicial:start,dataFinal:currentDate});
               const response=await fetcher('https://api.bling.com.br/Api/v3/pedidos/vendas?'+query,{headers:{Authorization:'Bearer '+current.access_token,Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(20000)});
-              if(!response.ok)throw Error('orders_unavailable');
+              if(!response.ok)throw Error('orders_unavailable_'+response.status);
               const payload=await response.json();if(!Array.isArray(payload.data))throw Error('invalid_orders');
               orders.push(...payload.data);if(payload.data.length<100){complete=true;break;}
             }
@@ -195,8 +195,11 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
         return send(res,200,page('<p><a href="/">Início</a> · <a href="/pedidos">Pedidos</a> · <a href="/produtos">Produtos</a></p><h2>'+heading+'</h2><p>Dados reais · Página '+n+' · '+data.data.length+' registros nesta página.</p>'+(products?'':'<p>Esta é uma consulta de pedidos, incluindo as situações retornadas pelo Bling. O total pode incluir frete e outros valores; ainda não representa faturamento pago sem frete.</p>')+'<div style="overflow:auto"><table style="width:100%;text-align:left;border-spacing:12px"><thead><tr>'+th+'</tr></thead><tbody>'+(rows||'<tr><td>Nenhum registro nesta página.</td></tr>')+'</tbody></table></div><p>'+nav+'</p>'),extra);
       }
       return send(res,404,page('<p>Página não encontrada.</p>'));
-    }catch{
-      return send(res,502,page('<p>Não foi possível concluir a consulta ou autorização. <a href="/">Volte ao início</a> e tente novamente. Se persistir, informe apenas esta mensagem; não compartilhe códigos nem chaves.</p>'));
+    }catch(error){
+      const code=String(error?.message||'');
+      const safeCode=/^(token_exchange_failed|orders_unavailable|bling_read_failed)_\d{3}$/.test(code)?code:code==='TimeoutError'?'tempo_esgotado':'consulta_indisponivel';
+      if(code.startsWith('token_exchange_failed_')){sharedSession=null;return send(res,401,page('<h2>Autorização do Bling precisa ser renovada</h2><p>O Bling recusou a renovação da conexão. Isso pode ocorrer após alterar as permissões do aplicativo.</p><p><a href="/">Reconectar Bling</a></p><small>Referência: '+safeCode+'</small>'));}
+      return send(res,502,page('<p>Referência da consulta: '+safeCode+'</p>'+'<p>Não foi possível concluir a consulta ou autorização. <a href="/">Volte ao início</a> e tente novamente. Se persistir, informe apenas esta mensagem; não compartilhe códigos nem chaves.</p>'));
     }
   };
 }
