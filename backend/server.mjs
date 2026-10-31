@@ -1,3 +1,4 @@
+import {createMercadoLivre} from './mercado-livre.mjs';
 import {dailySummary} from './daily-summary.mjs';
 import {createCancellation} from './cancellation.mjs';
 import {createChannels,describeChannel} from './channels.mjs';
@@ -39,6 +40,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
   // The already-configured server-side client secret supplies key material.
   // Key derivation is domain-separated from the Bling credential itself.
   const crypto=vault(env.BLING_CLIENT_SECRET||randomBytes(32));
+  const mercadoLivre=createMercadoLivre({env,base,crypto,send,shell,fetcher,clock});
   const usedStates=new Map(),pendingStates=new Map(),renewals=new Map();
   let sharedSession=null;
   const dashboardCache=new Map();
@@ -79,8 +81,9 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
       for(const [k,v] of pendingStates)if(v<=clock())pendingStates.delete(k);
       for(const [k,v] of renewals)if(v.until<=clock())renewals.delete(k);
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
-      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'0.6.0'}),{'Content-Type':'application/json'});
+      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'0.7.0'}),{'Content-Type':'application/json'});
       if(!['GET','POST'].includes(req.method))return send(res,405,'Método não permitido',{Allow:'GET, POST'});
+      if(await mercadoLivre(req,res,url))return;
       if(!env.BLING_CLIENT_ID||!env.BLING_CLIENT_SECRET)return send(res,503,page('<p>Configure BLING_CLIENT_ID e BLING_CLIENT_SECRET no Environment do Render.</p>'));
       const cookies=parseCookies(req),browserSession=readSession(cookies);
       if(!sharedSession&&browserSession)sharedSession=browserSession;
@@ -112,12 +115,6 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
         sharedSession=tokens;
         analytics.reset();cancellation.reset();channelDirectory.reset();
         return send(res,303,'',{'Location':'/dashboard','Set-Cookie':[cookie('',0),...tokenCookies(crypto,tokens)]});
-      }
-      if(path==='/mercado-livre'&&req.method==='GET'){
-        const pending=(title,description)=>'<article class="kpi"><span class="label">'+title+'</span><strong style="font-size:20px;color:#96a0ad">Aguardando conexão</strong><small>'+description+'</small></article>';
-        const content='<div class="heading"><div><div class="eyebrow">Inteligência de marketplace</div><h1>Mercado Livre</h1><p class="muted">Casa Nissi · desempenho dos anúncios e operação Full</p></div><span class="tag">Conta ainda não conectada</span></div><div class="notice"><strong>Esta aba está preparada, mas ainda não recebe dados do Mercado Livre.</strong><br>A conexão com o Bling permanece separada. Para consultar métricas exclusivas dos anúncios, será necessária a autorização da conta do Mercado Livre.</div><section class="kpis">'+pending('Visitas aos anúncios','Tráfego por anúncio e período')+pending('Conversão','Pedidos e visitas com a mesma base de comparação')+pending('Publicidade','Investimento, vendas atribuídas e ROAS, quando disponíveis')+pending('Estoque Full','Saldo disponível e situação do inventário')+'</section><section class="split"><article class="card"><div class="card-head"><div><h2>Análise dos anúncios</h2><p class="muted">Indicadores previstos após a conexão</p></div><span class="tag">Mercado Livre</span></div><div class="insight"><b>Produto e anúncio</b><p>Relacionar SKU do Bling ao anúncio e suas variações, sem duplicar pedidos.</p></div><div class="insight"><b>Tráfego e vendas</b><p>Comparar visitas e pedidos por período para identificar anúncios com tráfego e poucas vendas.</p></div><div class="insight"><b>Publicidade</b><p>Acompanhar métricas disponíveis na conta e distinguir dados atribuídos aos anúncios de vendas totais.</p></div><div class="insight"><b>Full</b><p>Cruzar saldo disponível e ritmo de vendas para calcular cobertura e orientar reposição.</p></div></article><article class="card"><h2>Para ativar</h2><div class="insight"><b>1. Cadastrar a aplicação</b><p>Criar uma aplicação na área de desenvolvedores do Mercado Livre para esta integração.</p></div><div class="insight"><b>2. Configurar no Render</b><p>Guardar as credenciais no servidor, fora do repositório público.</p></div><div class="insight"><b>3. Autorizar a Casa Nissi</b><p>Concluir a autorização no Mercado Livre. As permissões e a disponibilidade das APIs definirão os dados acessíveis.</p></div><p class="muted">Não é necessário alterar a conexão já existente entre Bling e Mercado Livre.</p></article></section><article class="card"><h2>Enquanto isso</h2><p class="muted">A análise por produto já consulta vendas registradas no Bling. Use o filtro de canal para separar as lojas disponíveis.</p><p><a class="button primary" href="/analises">Abrir análise dos produtos</a></p></article>';
-        const html=shell(content,{title:'Mercado Livre',active:'ml',refresh:0}).replace('<strong>● Bling conectado</strong>','<strong>'+(session?'● Bling conectado':'Bling sem sessão ativa')+'</strong>');
-        return send(res,200,html);
       }
       if(path==='/produtos'&&req.method==='GET'&&!url.searchParams.has('catalogo')&&!url.searchParams.has('pagina'))return send(res,303,'',{'Location':'/analises'});
       if(path==='/analises'&&req.method==='GET'){
@@ -205,6 +202,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
   };
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){createServer(createApp()).listen(Number(process.env.PORT||3000),'0.0.0.0',()=>console.log('Servidor disponível · produtos e canais Bling 0.5.0'));}
+
 
 
 
