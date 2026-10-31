@@ -1,3 +1,5 @@
+import {createCancellation} from './cancellation.mjs';
+import {createChannels,describeChannel} from './channels.mjs';
 import { createAnalytics, renderAnalytics, shell } from './analytics.mjs';
 import { createServer } from 'node:http';
 import { createHash, createHmac, randomBytes, timingSafeEqual, createCipheriv, createDecipheriv, hkdfSync } from 'node:crypto';
@@ -39,7 +41,15 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
   const usedStates=new Map(),pendingStates=new Map(),renewals=new Map();
   let sharedSession=null;
   const dashboardCache=new Map();
-  const analytics=createAnalytics({clock,request:async resource=>{if(!sharedSession)throw Error('not_connected');sharedSession=await renew(sharedSession);const response=await fetcher('https://api.bling.com.br/Api/v3/'+resource,{headers:{Authorization:'Bearer '+sharedSession.access_token,Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(20000)});if(!response.ok)throw Error('bling_read_failed');return response.json();}});
+  async function blingRead(resource){
+    if(!sharedSession)throw Error('not_connected');sharedSession=await renew(sharedSession);
+    const response=await fetcher('https://api.bling.com.br/Api/v3/'+resource,{headers:{Authorization:'Bearer '+sharedSession.access_token,Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(20000)});
+    if(!response.ok)throw Error('bling_read_failed');return response.json();
+  }
+  const cancellation=createCancellation({request:blingRead,clock,overrideIds:(env.BLING_CANCELLED_STATUS_IDS||'').split(',').map(s=>s.trim()).filter(Boolean)});
+  const channelDirectory=createChannels({request:blingRead,clock});
+  const analytics=createAnalytics({clock,request:blingRead,classifyOrders:cancellation.classify,channels:channelDirectory.get});
+
   function packed(value){return Buffer.from(crypto.encrypt(value),'base64').toString('base64url');}
   function unpack(value){return crypto.decrypt(Buffer.from(value,'base64url').toString('base64'));}
   function oauthCookie(value){return cookie(packed(value));}
@@ -68,7 +78,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
       for(const [k,v] of pendingStates)if(v<=clock())pendingStates.delete(k);
       for(const [k,v] of renewals)if(v.until<=clock())renewals.delete(k);
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
-      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'0.4.2'}),{'Content-Type':'application/json'});
+      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'0.5.0'}),{'Content-Type':'application/json'});
       if(!['GET','POST'].includes(req.method))return send(res,405,'Método não permitido',{Allow:'GET, POST'});
       if(!env.BLING_CLIENT_ID||!env.BLING_CLIENT_SECRET)return send(res,503,page('<p>Configure BLING_CLIENT_ID e BLING_CLIENT_SECRET no Environment do Render.</p>'));
       const cookies=parseCookies(req),browserSession=readSession(cookies);
@@ -99,7 +109,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
         if(url.searchParams.has('error')||!url.searchParams.get('code'))return send(res,400,page('<p>Autorização não concluída. <a href="/">Voltar</a></p>'),{'Set-Cookie':cookie('',0)});
         const tokens=await exchange({grant_type:'authorization_code',code:url.searchParams.get('code')});
         sharedSession=tokens;
-        analytics.reset();
+        analytics.reset();cancellation.reset();channelDirectory.reset();
         return send(res,303,'',{'Location':'/dashboard','Set-Cookie':[cookie('',0),...tokenCookies(crypto,tokens)]});
       }
       if(path==='/mercado-livre'&&req.method==='GET'){
@@ -116,7 +126,8 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
         sharedSession=await renew(session);
         return send(res,200,renderAnalytics(analytics.get(days),url,clock()),browserSession?{'Set-Cookie':tokenCookies(crypto,sharedSession)}:{});
       }
-      if(path==='/dashboard'&&req.method==='GET'){
+      if(path==='/dashboard'&&req.method==='GET')return send(res,303,'',{'Location':'/analises'+url.search});
+      if(path==='/visao-geral'&&req.method==='GET'){
         if(!session)return send(res,303,'',{'Location':'/'});
         const days=Number(url.searchParams.get('dias')||30);
         if(![1,7,30].includes(days))return send(res,400,page('<p>Período inválido.</p>'));
@@ -142,22 +153,26 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
           promise.catch(()=>dashboardCache.delete(key));
           for(const [k,v] of dashboardCache)if(clock()-v.created>300000)dashboardCache.delete(k);
         }
-        const result=await entry.promise,all=result.orders;
-        const loja=url.searchParams.get('loja')||'',search=(url.searchParams.get('busca')||'').toLowerCase().slice(0,100);
-        const orders=all.filter(o=>(!loja||String(o.loja?.id)===loja)&&(!search||String(o.numero||o.id).toLowerCase().includes(search)));
+        const result=await entry.promise;
+        const classification=await cancellation.classify(result.orders),directory=await channelDirectory.get();
+        if(!classification.complete)return send(res,503,shell('<h1>Conferência das situações pendente</h1><div class="notice">A API não permitiu identificar as situações de '+classification.unknown.length+' pedidos. Os totais não são exibidos até confirmar quais situações representam cancelamento. É necessário liberar consulta de Situações no Bling, ou informar os IDs confirmados em BLING_CANCELLED_STATUS_IDS.</div>',{title:'Conferência',refresh:60}));
+        const all=classification.accepted;
+        const grupo=url.searchParams.get('grupo')||'',loja=url.searchParams.get('loja')||'',search=(url.searchParams.get('busca')||'').toLowerCase().slice(0,100);
+        const orders=all.filter(o=>(!grupo||describeChannel(directory,o.loja?.id).group===grupo)&&(!loja||String(o.loja?.id)===loja)&&(!search||String(o.numero||o.id).toLowerCase().includes(search)));
         const sum=orders.reduce((a,o)=>a+(typeof o.total==='number'?o.total:0),0),known=orders.filter(o=>typeof o.total==='number').length;
         const money=n=>n.toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
         const stores=[...new Set(all.map(o=>o.loja?.id).filter(v=>v!=null))];
         const options=[1,7,30].map(v=>'<option value="'+v+'" '+(v===days?'selected':'')+'>'+(v===1?'Hoje':'Últimos '+v+' dias')+'</option>').join('');
-        const storeOptions=stores.map(v=>'<option value="'+escape(v)+'" '+(String(v)===loja?'selected':'')+'>Loja '+escape(v)+'</option>').join('');
+        const storeOptions=stores.map(v=>'<option value="'+escape(v)+'" '+(String(v)===loja?'selected':'')+'>'+escape(describeChannel(directory,v).name)+'</option>').join('');
         const groups=new Map();for(const o of orders){const k=String(o.loja?.id??'Sem identificação');const group=groups.get(k)||{n:0,total:0};group.n++;group.total+=typeof o.total==='number'?o.total:0;groups.set(k,group);}
-        const summary=[...groups].map(([k,v])=>'<tr><td>'+escape(k)+'</td><td>'+v.n+'</td><td>'+money(v.total)+'</td></tr>').join('');
-        const rows=orders.slice().sort((a,b)=>String(b.data).localeCompare(String(a.data))).slice(0,100).map(o=>'<tr><td>'+escape(o.numero||o.id)+'</td><td>'+escape(o.data||'—')+'</td><td>'+escape(o.loja?.id??'—')+'</td><td>'+escape(o.situacao?.id??'—')+'</td><td>'+(typeof o.total==='number'?money(o.total):'Indisponível')+'</td></tr>').join('');
+        const summary=[...groups].map(([k,v])=>'<tr><td>'+escape(describeChannel(directory,k).name)+'</td><td>'+v.n+'</td><td>'+money(v.total)+'</td></tr>').join('');
+        const rows=orders.slice().sort((a,b)=>String(b.data).localeCompare(String(a.data))).slice(0,100).map(o=>'<tr><td>'+escape(o.numero||o.id)+'</td><td>'+escape(o.data||'—')+'</td><td>'+escape(describeChannel(directory,o.loja?.id).name)+'</td><td>'+escape(classification.mapping.get(String(o.situacao?.id))?.name||o.situacao?.id||'—')+'</td><td>'+(typeof o.total==='number'?money(o.total):'Indisponível')+'</td></tr>').join('');
         const daily=Array.from({length:days},(_,i)=>{const d=new Date(start+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+i);const date=d.toISOString().slice(0,10);return {date,total:orders.filter(o=>o.data===date).reduce((a,o)=>a+(typeof o.total==='number'?o.total:0),0)};});
         const max=Math.max(1,...daily.map(d=>d.total)),w=900/days;
         const svg='<svg viewBox="0 0 900 190" role="img" aria-label="Valor total dos pedidos por dia" style="width:100%;height:190px">'+daily.map((d,i)=>'<rect fill="#3483fa" x="'+(i*w+2)+'" width="'+Math.max(1,w-4)+'" y="'+(180-d.total/max*160)+'" height="'+(d.total/max*160)+'"><title>'+d.date+': '+money(d.total)+'</title></rect>').join('')+'</svg>';
         const metric=(label,value)=>'<article style="background:#f6f6f4;padding:20px;border-radius:10px"><div style="color:#555;font-size:13px">'+label+'</div><strong style="font-size:28px;display:block;margin-top:10px">'+value+'</strong></article>';
-        const content='<div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><div><h2>Dashboard de vendas</h2><p>Dados reais do Bling · Casa Nissi</p></div><p><a href="/dashboard?dias='+days+'">Atualizar</a> · <a href="/produtos">Produtos</a></p></div><p style="font-size:13px;color:#666">Atualização automática a cada 60 segundos · Última consulta: '+new Date(result.updated).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'})+'</p><form method="get" action="/dashboard" style="display:flex;gap:12px;flex-wrap:wrap;margin:24px 0"><label>Período <select name="dias">'+options+'</select></label><label>Canal (ID no Bling) <select name="loja"><option value="">Todos</option>'+storeOptions+'</select></label><label>Buscar pedido <input name="busca" value="'+escape(search)+'"></label><button>Aplicar filtros</button></form>'+(!result.complete?'<p style="background:#fff4cf;padding:12px">Consulta parcial: limite de 2.000 pedidos atingido. Os indicadores abaixo cobrem somente os registros carregados.</p>':'')+(known<orders.length?'<p>Há pedidos sem valor total disponível; eles não entram na soma.</p>':'')+'<section style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px">'+metric('Total dos pedidos',money(sum))+metric('Pedidos registrados',String(orders.length))+metric('Ticket médio dos pedidos',known?money(sum/known):'—')+'</section><p style="font-size:13px;color:#666">Valores conforme o total do pedido no Bling, podendo incluir frete e outras cobranças. Inclui as situações retornadas; não equivale a vendas pagas ou faturamento líquido.</p><section style="margin:30px 0"><h3>Pedidos por dia · valor total</h3>'+svg+'<div style="display:flex;justify-content:space-between;font-size:12px"><span>'+start+'</span><span>'+currentDate+'</span></div></section><h3>Resumo por canal (ID Bling)</h3><table style="width:100%;text-align:left;border-spacing:10px"><thead><tr><th>Canal</th><th>Pedidos</th><th>Total</th></tr></thead><tbody>'+summary+'</tbody></table><h3>Pedidos recentes</h3><p style="font-size:13px">Até 100 pedidos da seleção. Situações exibidas pelo ID retornado pelo Bling.</p><div style="overflow:auto"><table style="width:100%;text-align:left;border-spacing:10px"><thead><tr><th>Pedido</th><th>Data</th><th>Canal</th><th>Situação</th><th>Total</th></tr></thead><tbody>'+(rows||'<tr><td>Sem pedidos nesta seleção.</td></tr>')+'</tbody></table></div>';
+        const channelTabs='<nav class="channel-tabs">'+['','Mercado Livre','Site','Shopee','Amazon','Outros canais','Não classificado'].map(g=>'<a class="'+(g===grupo?'selected':'')+'" href="/visao-geral?'+escape(new URLSearchParams({dias:String(days),grupo:g}))+'">'+escape(g||'Todos os canais')+'</a>').join('')+'</nav>';
+        const content=channelTabs+'<div class="notice">Cancelados excluídos: '+classification.cancelled.length+' pedidos. '+(directory.complete?'Canais identificados pelo Bling.':'Alguns canais ainda não puderam ser identificados.')+'</div><div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><div><h2>Dashboard de vendas</h2><p>Dados reais do Bling · Casa Nissi</p></div><p><a href="/visao-geral?dias='+days+'">Atualizar</a> · <a href="/produtos">Produtos</a></p></div><p style="font-size:13px;color:#666">Atualização automática a cada 60 segundos · Última consulta: '+new Date(result.updated).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'})+'</p><form method="get" action="/visao-geral" style="display:flex;gap:12px;flex-wrap:wrap;margin:24px 0"><input type="hidden" name="grupo" value="'+escape(grupo)+'"><label>Período <select name="dias">'+options+'</select></label><label>Canal de venda <select name="loja"><option value="">Todos</option>'+storeOptions+'</select></label><label>Buscar pedido <input name="busca" value="'+escape(search)+'"></label><button>Aplicar filtros</button></form>'+(!result.complete?'<p style="background:#fff4cf;padding:12px">Consulta parcial: limite de 2.000 pedidos atingido. Os indicadores abaixo cobrem somente os registros carregados.</p>':'')+(known<orders.length?'<p>Há pedidos sem valor total disponível; eles não entram na soma.</p>':'')+'<section style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px">'+metric('Total dos pedidos',money(sum))+metric('Pedidos registrados',String(orders.length))+metric('Ticket médio dos pedidos',known?money(sum/known):'—')+'</section><p style="font-size:13px;color:#666">Valores conforme o total do pedido no Bling, podendo incluir frete e outras cobranças. Pedidos cancelados foram excluídos. As demais situações não equivalem a pagamento confirmado ou faturamento líquido.</p><section style="margin:30px 0"><h3>Pedidos por dia · valor total</h3>'+svg+'<div style="display:flex;justify-content:space-between;font-size:12px"><span>'+start+'</span><span>'+currentDate+'</span></div></section><h3>Resumo por canal de venda</h3><table style="width:100%;text-align:left;border-spacing:10px"><thead><tr><th>Canal</th><th>Pedidos</th><th>Total</th></tr></thead><tbody>'+summary+'</tbody></table><h3>Pedidos recentes</h3><p style="font-size:13px">Até 100 pedidos da seleção. Situações identificadas no cadastro do Bling.</p><div style="overflow:auto"><table style="width:100%;text-align:left;border-spacing:10px"><thead><tr><th>Pedido</th><th>Data</th><th>Canal</th><th>Situação</th><th>Total</th></tr></thead><tbody>'+(rows||'<tr><td>Sem pedidos nesta seleção.</td></tr>')+'</tbody></table></div>';
         return send(res,200,shell('<nav style="margin-bottom:20px"><a class="button primary" href="/analises">Abrir análise por produto →</a></nav>'+content,{title:'Visão geral',active:'overview'}),browserSession?{'Set-Cookie':tokenCookies(crypto,current)}:{});
       }
       if(['/pedidos','/produtos','/test/bling'].includes(path)&&req.method==='GET'){
@@ -185,6 +200,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
     }
   };
 }
-if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){createServer(createApp()).listen(Number(process.env.PORT||3000),'0.0.0.0',()=>console.log('Servidor disponível · análises Bling 0.4.2'));}
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){createServer(createApp()).listen(Number(process.env.PORT||3000),'0.0.0.0',()=>console.log('Servidor disponível · produtos e canais Bling 0.5.0'));}
+
 
 
