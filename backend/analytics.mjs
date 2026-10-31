@@ -56,7 +56,7 @@ export function createAnalytics({request,clock=()=>Date.now(),classifyOrders=asy
     job.orders.push({...cached.order,cancelled:cancelledIds.has(key)});job.processed++;
    }
    if(!job.error)job.phase=job.failed?'Carga concluída com pedidos indisponíveis':'Carga concluída';job.finished=true;
-  }catch{job.error=true;job.phase='O Bling não concluiu a consulta. A carga será tentada novamente.';job.finished=true;}
+  }catch(error){job.error=true;const code=String(error?.message||'');job.errorCode=/^(token_exchange_failed|bling_read_failed)_\d{3}$/.test(code)?code:'consulta_indisponivel';job.phase='O Bling não concluiu a consulta. A carga será tentada novamente.';job.finished=true;}
   finally{job.updated=clock();active=null;}
  }
  function get(days){
@@ -94,6 +94,7 @@ export function renderAnalytics(state,url,now=Date.now()){
  if(!job)return shell('<h1>Iniciando consulta</h1>',{refresh:10});
  if(state.busy)return shell('<h1>Importação em andamento</h1><div class="notice">Outra janela está consultando os itens. Esta tela tentará carregar seu período novamente em 15 segundos.</div>',{refresh:15});
  if(job.unknownStatuses)return shell('<h1>Conferência de cancelamentos pendente</h1><div class="notice">'+esc(job.phase)+'<br>É necessário liberar a consulta de Situações no aplicativo Bling, ou configurar os IDs confirmados em BLING_CANCELLED_STATUS_IDS. Nenhum ID é presumido.</div>',{refresh:60});
+ if(job.error&&!job.orders.length)return shell('<h1>Consulta ao Bling indisponível</h1><div class="notice">Não foi possível carregar os pedidos. Os indicadores não representam vendas zeradas.<br>Referência: '+esc(job.errorCode||'consulta_indisponivel')+'</div><p><a class="button" href="/">Renovar conexão com o Bling</a></p>',{refresh:60});
  const store=url.searchParams.get('loja')||'',status=url.searchParams.get('situacao')||'',search=url.searchParams.get('busca')||'';
  const group=url.searchParams.get('grupo')||'';
  const a=aggregate(job.orders,job.range,{store,status,search,group,directory:job.channels}),complete=job.finished&&job.listComplete&&!job.failed&&!job.error;
