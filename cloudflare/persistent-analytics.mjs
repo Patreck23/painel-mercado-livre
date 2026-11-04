@@ -52,7 +52,7 @@ export function createPersistentAnalytics({state,schedule,request,classifyOrders
     }
     if(meta.cursor>=summaries.length){meta.finished=true;meta.phase=meta.failed?'Carga concluída com pedidos indisponíveis':'Carga concluída';}
    }
-  }catch(error){meta.error=true;meta.finished=true;const code=String(error?.message||'');meta.errorCode=/^(token_exchange_failed|bling_read_failed)_\d{3}$/.test(code)?code:'consulta_indisponivel';meta.phase='Consulta interrompida. Os registros carregados são parciais.';}
+  }catch(error){meta.error=true;meta.finished=true;const code=String(error?.message||'');meta.errorCode=/^(token_exchange_failed|bling_read_failed)_\d{3}$/.test(code)||/^bling_(token|read)_(io_context|timeout|network|invalid_json|invalid_payload)$/.test(code)||['invalid_list','missing_items','not_connected'].includes(code)?code:'consulta_indisponivel';meta.phase='Consulta interrompida. Os registros carregados são parciais.';}
   if(!current())return;
   meta.updated=clock();state.put(metaKey(key),meta);
   if(!meta.finished)schedule(clock()+1000);

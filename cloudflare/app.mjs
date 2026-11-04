@@ -34,8 +34,13 @@ function tokenCookies(crypto,value){
   return parts.map((p,i)=>`${sessionPrefix}${i}=${p}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${p?2592000:0}`);
 }
 export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Date.now(),state,schedule=()=>{}}={}){
-  let apiQueue=Promise.resolve(),lastRequest=0;
-  function fetcher(...args){const task=apiQueue.then(async()=>{const delay=Math.max(0,380-(Date.now()-lastRequest));if(delay)await new Promise(r=>setTimeout(r,delay));lastRequest=Date.now();return transport(...args);});apiQueue=task.catch(()=>{});return task;}
+  let nextRequestAt=0;
+  async function fetcher(...args){
+    // Carry timestamps between invocations, never a promise belonging to another request.
+    const now=Date.now(),slot=Math.max(now,nextRequestAt);nextRequestAt=slot+380;
+    const delay=slot-now;if(delay)await new Promise(resolve=>setTimeout(resolve,delay));
+    return transport(...args);
+  }
   const base=env.APP_BASE_URL;
   // The already-configured server-side client secret supplies key material.
   // Key derivation is domain-separated from the Bling credential itself.
@@ -47,10 +52,14 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
   const dashboardCache=new Map();
   async function blingRead(resource){
     if(!sharedSession)throw Error('not_connected');sharedSession=await renew(sharedSession);sessionStore.set(sharedSession);
-    const get=()=>fetcher('https://api.bling.com.br/Api/v3/'+resource,{headers:{Authorization:'Bearer '+sharedSession.access_token,Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(20000)});
+    const get=async()=>{
+      try{return await fetcher('https://api.bling.com.br/Api/v3/'+resource,{headers:{Authorization:'Bearer '+sharedSession.access_token,Accept:'application/json'},redirect:'manual',signal:AbortSignal.timeout(20000)});}
+      catch(error){const msg=String(error?.message||'');throw Error(/different request|I\/O|request context/i.test(msg)?'bling_read_io_context':error?.name==='TimeoutError'?'bling_read_timeout':'bling_read_network');}
+    };
     let response=await get();
     if(response.status===401){sharedSession=await renew({...sharedSession,expiresAt:0});sessionStore.set(sharedSession);response=await get();}
-    if(!response.ok)throw Error('bling_read_failed_'+response.status);return response.json();
+    if(!response.ok)throw Error('bling_read_failed_'+response.status);
+    try{return await response.json();}catch{throw Error('bling_read_invalid_json');}
   }
   const cancellation=createCancellation({request:blingRead,clock,overrideIds:(env.BLING_CANCELLED_STATUS_IDS||'').split(',').map(s=>s.trim()).filter(Boolean)});
   const channelDirectory=createChannels({request:blingRead,clock});
@@ -89,7 +98,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
       for(const [k,v] of pendingStates)if(v<=clock())pendingStates.delete(k);
       for(const [k,v] of renewals)if(v.until<=clock())renewals.delete(k);
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
-      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'1.0.1-cloudflare'}),{'Content-Type':'application/json'});
+      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'1.0.2-cloudflare'}),{'Content-Type':'application/json'});
       if(!['GET','POST'].includes(req.method))return send(res,405,'Método não permitido',{Allow:'GET, POST'});
       if(await mercadoLivre(req,res,url))return;
       if(!env.BLING_CLIENT_ID||!env.BLING_CLIENT_SECRET)return send(res,200,page('<h2>Bem-vindo ao Painel Casa Nissi</h2><p>O dashboard está online na Cloudflare.</p><p><a href="/mercado-livre">Conectar Mercado Livre</a></p><p>Para ativar também o Bling, configure BLING_CLIENT_ID e BLING_CLIENT_SECRET nos Secrets deste Worker.</p>'));
@@ -190,11 +199,9 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
         const n=Number(url.searchParams.get('pagina')||'1');
         if(!Number.isSafeInteger(n)||n<1||n>10000)return send(res,400,page('<p>Página inválida.</p>'));
         const resource=products?'produtos':'pedidos/vendas';
-        const response=await fetcher('https://api.bling.com.br/Api/v3/'+resource+'?'+new URLSearchParams({pagina:String(n),limite:'50'}),{headers:{Authorization:'Bearer '+current.access_token,Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(20000)});
-        // Persist rotated tokens even if the business-data request fails.
+        const data=await blingRead(resource+'?'+new URLSearchParams({pagina:String(n),limite:'50'}));
         const extra=browserSession?{'Set-Cookie':tokenCookies(crypto,sharedSession)}:{};
-        if(!response.ok){const status=Number(response.status)||502;return send(res,status===401?401:502,page('<p>O Bling não liberou esta consulta (HTTP '+status+'). Confira as permissões do aplicativo; se necessário, autorize novamente.</p><p><a href="/">Voltar</a></p>'),extra);}
-        const data=await response.json();if(!Array.isArray(data.data))throw Error('invalid_response');
+        if(!Array.isArray(data.data))throw Error('invalid_response');
         const heading=products?'Produtos cadastrados':'Pedidos registrados no Bling';
         const th=products?'<th>Produto</th><th>SKU</th><th>Preço cadastrado</th>':'<th>Pedido</th><th>Data</th><th>Valor total do pedido</th><th>Situação (ID Bling)</th>';
         const brl=v=>typeof v==='number'?v.toLocaleString('pt-BR',{style:'currency',currency:'BRL'}):'—';
@@ -205,7 +212,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
       return send(res,404,page('<p>Página não encontrada.</p>'));
     }catch(error){
       const code=String(error?.message||'');
-      const safeCode=/^(token_exchange_failed|orders_unavailable|bling_read_failed)_\d{3}$/.test(code)||/^bling_(credentials_missing|token_(timeout|network|invalid_json|invalid_payload))$/.test(code)?code:phase!=='request'?phase+'_failed':'consulta_indisponivel';
+      const safeCode=/^(token_exchange_failed|orders_unavailable|bling_read_failed)_\d{3}$/.test(code)||/^bling_(credentials_missing|token_(timeout|network|invalid_json|invalid_payload)|read_(io_context|timeout|network|invalid_json))$/.test(code)?code:phase!=='request'?phase+'_failed':'consulta_indisponivel';
       if(code.startsWith('token_exchange_failed_')){sharedSession=null;sessionStore.set(null);return send(res,401,page('<h2>Autorização do Bling precisa ser renovada</h2><p>O Bling recusou a renovação da conexão. Isso pode ocorrer após alterar as permissões do aplicativo.</p><p><a href="/">Reconectar Bling</a></p><small>Referência: '+safeCode+'</small>'));}
       return send(res,502,page('<p>Referência da consulta: '+safeCode+'</p>'+'<p>Não foi possível concluir a consulta ou autorização. <a href="/">Volte ao início</a> e tente novamente. Se persistir, informe apenas esta mensagem; não compartilhe códigos nem chaves.</p>'));
     }
