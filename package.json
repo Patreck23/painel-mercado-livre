@@ -1,0 +1,15 @@
+{
+  "name": "painel-casa-nissi-cloudflare",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test cloudflare/*.test.mjs backend/*.test.mjs",
+    "check": "wrangler deploy --dry-run",
+    "test:runtime": "wrangler deploy --dry-run --outdir .worker-test && node cloudflare/runtime-check.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

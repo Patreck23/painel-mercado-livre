@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "painel-casa-nissi",
+  "main": "cloudflare/worker.mjs",
+  "compatibility_date": "2026-11-03",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [{"name": "DASHBOARD", "class_name": "CasaNissiDashboard"}]
+  },
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["CasaNissiDashboard"]}]
+}
