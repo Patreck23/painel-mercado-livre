@@ -21,7 +21,7 @@ test('OAuth works without cookies and rejects invalid state and replay',async()=
  const sessionCookies=done.headers.getSetCookie().filter(s=>s.startsWith('__Host-nissi-session-')).map(s=>s.split(';')[0]).join('; ');assert.ok(sessionCookies);assert.ok(!sessionCookies.includes('access-'));
  const products=await request('/produtos?catalogo=1');assert.equal(products.status,200);assert.ok((await products.text()).includes('Produto &lt;seguro&gt;'));assert.equal(products.headers.get('set-cookie'),null);
  const orders=await request('/pedidos');assert.equal(orders.status,200);assert.ok((await orders.text()).includes('Pedidos registrados'));assert.equal(reads,2);
- const dash=await request('/visao-geral');assert.equal(dash.status,200);const dashboard=await dash.text();assert.ok(dashboard.includes('content="60"'));assert.ok(dashboard.includes('100,00'));assert.ok(dashboard.includes('Total dos pedidos'));assert.equal(reads,3);
+ const dash=await request('/visao-geral');assert.equal(dash.status,200);const dashboard=await dash.text();assert.ok(dashboard.includes('content="1800"'));assert.ok(dashboard.includes('100,00'));assert.ok(dashboard.includes('Total dos pedidos'));assert.equal(reads,3);
  await request('/visao-geral');assert.equal(reads,3);
  now+=3600000;
  await Promise.all([request('/pedidos'),request('/produtos?catalogo=1')]);assert.equal(exchanges,2);
@@ -29,4 +29,5 @@ test('OAuth works without cookies and rejects invalid state and replay',async()=
  const restarted=createServer(createApp({env,fetcher,clock:()=>now}));await new Promise(r=>restarted.listen(0,'127.0.0.1',r));try{const origin='http://127.0.0.1:'+restarted.address().port;assert.equal((await fetch(origin+'/pedidos',{redirect:'manual'})).status,303);assert.equal((await fetch(origin+'/',{headers:{Cookie:sessionCookies}})).status,200);}finally{await new Promise(r=>restarted.close(r));}
  }finally{await new Promise(r=>server.close(r));}
 });
+
 

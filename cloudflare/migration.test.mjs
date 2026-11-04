@@ -46,3 +46,14 @@ test('callback reports a safe token diagnostic without leaking credentials or au
   const result=await request(app,'/auth/bling/callback?state='+auth.searchParams.get('state')+'&code=private-code');assert.equal(result.status,502);assert.ok(result.body.includes(mode==='network'?'bling_token_network':'bling_token_invalid_json'));assert.ok(!result.body.includes('private-code'));assert.ok(!result.body.includes('untrusted upstream error'));
  }
 });
+
+test('30-minute sync preserves loaded products and fetches only new or changed summaries',async()=>{
+ const state=memory();let now=Date.parse('2026-11-03T15:00:00Z'),details=0;
+ let rows=[{id:1,data:'2026-11-03',total:10,situacao:{id:1}}];
+ const args={state,clock:()=>now,schedule:()=>{},channels:async()=>({mapping:new Map(),complete:true}),classifyOrders:async()=>({mapping:new Map([['1',{cancelled:false}],['2',{cancelled:true}]]),unknown:[],cancelled:rows.filter(o=>o.situacao.id===2)}),request:async path=>{if(path.includes('?'))return {data:rows};details++;const row=rows.find(o=>String(o.id)===path.split('/').at(-1));return {data:{...row,itens:[{produto:{id:7},descricao:'Produto',quantidade:1,valor:row.total}]}};}};
+ let app=createPersistentAnalytics(args);app.get(30);for(let i=0;i<3;i++)await app.tick();assert.equal(details,1);
+ app=createPersistentAnalytics(args);assert.equal(app.get(30).job.finished,true);await app.tick();assert.equal(details,1);
+ now+=1800000;rows.push({id:2,data:'2026-11-03',total:20,situacao:{id:1}});
+ assert.equal(app.get(30).job.orders.length,1);for(let i=0;i<3;i++)await app.tick();assert.equal(details,2);assert.equal(aggregate(app.get(30).job.orders,app.get(30).job.range).total,30);
+ now+=1800000;rows[0].situacao.id=2;app.get(30);for(let i=0;i<3;i++)await app.tick();assert.equal(details,3);assert.equal(aggregate(app.get(30).job.orders,app.get(30).job.range).total,20);
+});
