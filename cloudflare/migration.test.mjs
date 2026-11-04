@@ -7,7 +7,7 @@ const memory=()=>{const docs=new Map();return {get:k=>structuredClone(docs.get(k
 const request=async(app,path)=>{let result;await app({method:'GET',url:path,headers:{}},{writeHead(status,headers){result={status,headers};},end(body){result.body=body;}});return result;};
 test('Bling OAuth state and encrypted session survive restart without browser cookies',async()=>{
  const state=memory(),env={BLING_CLIENT_ID:'client',BLING_CLIENT_SECRET:'secret',APP_BASE_URL:'https://painel.example.workers.dev'};let exchanges=0;
- const fetcher=async(url,options)=>{if(url.includes('/oauth/token')){exchanges++;assert.equal(options.body.get('redirect_uri'),env.APP_BASE_URL+'/auth/bling/callback');return {ok:true,json:async()=>({access_token:'private-bling-token',refresh_token:'private-bling-refresh',expires_in:3600})};}return {ok:true,json:async()=>({data:[]})};};
+ const fetcher=async(url,options)=>{if(url.includes('/oauth/token')){exchanges++;assert.equal(new URLSearchParams(options.body).get('redirect_uri'),env.APP_BASE_URL+'/auth/bling/callback');return {ok:true,json:async()=>({access_token:'private-bling-token',refresh_token:'private-bling-refresh',expires_in:3600})};}return {ok:true,json:async()=>({data:[]})};};
  let app=createApp({state,env,fetcher}),home=await request(app,'/');const startLink=home.body.match(/href="(\/auth\/bling\/start\?ticket=[^"]+)"/)[1];
  const start=await request(app,startLink),auth=new URL(start.headers.Location);assert.equal(start.status,303);assert.equal(auth.searchParams.get('redirect_uri'),env.APP_BASE_URL+'/auth/bling/callback');
  app=createApp({state,env,fetcher});const path='/auth/bling/callback?state='+auth.searchParams.get('state')+'&code=example';assert.equal((await request(app,path)).status,303);assert.equal(exchanges,1);
@@ -16,7 +16,7 @@ test('Bling OAuth state and encrypted session survive restart without browser co
 });
 test('Mercado Livre authorization survives restart independently of Bling',async()=>{
  const state=memory(),env={ML_CLIENT_ID:'app',ML_CLIENT_SECRET:'secret',APP_BASE_URL:'https://painel.example.workers.dev'};let exchanges=0;
- const fetcher=async(url,options)=>{if(url.endsWith('/oauth/token')){exchanges++;assert.ok(options.body.get('code_verifier'));return {ok:true,json:async()=>({access_token:'private-ml-token',refresh_token:'private-ml-refresh',expires_in:21600,user_id:42})};}return {ok:true,json:async()=>({id:42,nickname:'CASA_NISSI',site_id:'MLB'})};};
+ const fetcher=async(url,options)=>{if(url.endsWith('/oauth/token')){exchanges++;assert.ok(new URLSearchParams(options.body).get('code_verifier'));return {ok:true,json:async()=>({access_token:'private-ml-token',refresh_token:'private-ml-refresh',expires_in:21600,user_id:42})};}return {ok:true,json:async()=>({id:42,nickname:'CASA_NISSI',site_id:'MLB'})};};
  let app=createApp({state,env,fetcher}),home=await request(app,'/mercado-livre');const link=home.body.match(/href="(\/auth\/mercado-livre\/start\?ticket=[^"]+)"/)[1],start=await request(app,link),auth=new URL(start.headers.Location);
  app=createApp({state,env,fetcher});const callback='/auth/mercado-livre/callback?state='+auth.searchParams.get('state')+'&code=example';assert.equal((await request(app,callback)).status,303);
  assert.ok(!JSON.stringify(state.list('')).includes('private-ml-token'));
@@ -36,4 +36,13 @@ test('Bling 401 triggers one token renewal and persists the replacement',async()
  const app=createApp({state,env,fetcher}),home=await request(app,'/'),link=home.body.match(/href="(\/auth\/bling\/start\?ticket=[^"]+)"/)[1],start=await request(app,link),auth=new URL(start.headers.Location);
  await request(app,'/auth/bling/callback?state='+auth.searchParams.get('state')+'&code=example');const overview=await request(app,'/visao-geral');assert.equal(overview.status,200);assert.equal(exchanges,2);
  const restarted=createApp({state,env,fetcher});assert.equal((await request(restarted,'/pedidos')).status,200);assert.equal(exchanges,2);
+});
+test('callback reports a safe token diagnostic without leaking credentials or authorization code',async()=>{
+ for(const mode of ['network','json']){
+  const state=memory(),env={BLING_CLIENT_ID:' client\n',BLING_CLIENT_SECRET:' secret\n',APP_BASE_URL:'https://painel.example.workers.dev'};
+  const app=createApp({state,env,fetcher:async(url,options)=>{assert.equal(options.headers.Authorization,'Basic '+Buffer.from('client:secret').toString('base64'));assert.equal(typeof options.body,'string');if(mode==='network')throw Error('untrusted upstream error containing a private value');return {ok:true,json:async()=>{throw Error('bad json');}};}});
+  const home=await request(app,'/'),link=home.body.match(/href="(\/auth\/bling\/start\?ticket=[^"]+)"/)[1],start=await request(app,link),auth=new URL(start.headers.Location);
+  assert.equal(auth.searchParams.get('client_id'),'client');
+  const result=await request(app,'/auth/bling/callback?state='+auth.searchParams.get('state')+'&code=private-code');assert.equal(result.status,502);assert.ok(result.body.includes(mode==='network'?'bling_token_network':'bling_token_invalid_json'));assert.ok(!result.body.includes('private-code'));assert.ok(!result.body.includes('untrusted upstream error'));
+ }
 });

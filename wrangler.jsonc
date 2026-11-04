@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "painel-casa-nissi",
+  "name": "painel-mercado-livre",
   "main": "cloudflare/worker.mjs",
   "compatibility_date": "2026-11-03",
   "compatibility_flags": ["nodejs_compat"],
