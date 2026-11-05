@@ -69,6 +69,7 @@ export function createMLAnalytics({state,read,schedule,clock=()=>Date.now()}){
     m.cursor+=ids.length;if(m.cursor>=m.ids.length){m.metadataReady=true;m.stage='details';m.cursor=0;m.phase='Consultando qualidade, visitas e recomendações oficiais';}
    }else if(m.stage==='details'){
     m.phase='Consultando qualidade, visitas e recomendações oficiais';
+    if(!m.visitsV2){m.cursor=0;m.visitsV2=true;}
     const ids=m.ids.slice(m.cursor,m.cursor+10),missing=ids.filter(id=>{const c=state.get('ml-item:'+id);return !c||clock()-c.updated>=TTL;});
     if(missing.length){const response=await read('items/bulk?'+new URLSearchParams({ids:missing.join(',')}));if(!current())return;if(!Array.isArray(response))throw Error('ml_items_invalid');
      for(const entry of response){const raw=entry.body;if((entry.status_code??entry.code)!==200||!raw?.id)continue;const item=metadata(raw),prior=state.get('ml-item:'+item.id)?.item,events=state.get('ml-changes:'+item.id)||[];
@@ -79,10 +80,11 @@ export function createMLAnalytics({state,read,schedule,clock=()=>Date.now()}){
     for(const id of ids){
      let perf=state.get('ml-performance:'+id);if(!perf||clock()-perf.updated>=TTL){try{const p=await read('item/'+id+'/performance');perf={score:Number.isFinite(p.score)?p.score:null,level:p.level_wording||p.level||null,actions:pendingActions(p),calculated:p.calculated_at,updated:clock(),available:true};}catch(e){if(/ml_read_(401|429|5\d\d)|ml_read_(timeout|network|io_context)/.test(e.message))throw e;perf={available:false,reason:e.message,updated:clock()};}if(!current())return;state.put('ml-performance:'+id,perf);}
     }
-    const visitsKey=k+'visits:',need=ids.filter(id=>{const v=state.get(visitsKey+id);return !v||clock()-v.updated>=TTL;});
-    if(need.length){try{const response=await read('items/visits?'+new URLSearchParams({ids:need.join(','),date_from:m.range.start+'T00:00:00.000-03:00',date_to:shift(m.range.end,1)+'T00:00:00.000-03:00'}));if(!current())return;
-      const data=Array.isArray(response)?response:[response];for(const id of need){const v=data.find(x=>x.item_id===id);state.put(visitsKey+id,{total:Number.isFinite(v?.total_visits)?v.total_visits:null,updated:clock(),reason:v?'':'Sem resposta para este anúncio'});}
-     }catch(e){if(/ml_read_(401|429|5\d\d)|ml_read_(timeout|network|io_context)/.test(e.message))throw e;for(const id of need)state.put(visitsKey+id,{total:null,updated:clock(),reason:e.message});}
+    const visitsKey=k+'visits:';
+    for(const id of ids){const cached=state.get(visitsKey+id);if(cached?.version===2&&clock()-cached.updated<TTL)continue;
+     try{const response=await read('items/visits?'+new URLSearchParams({ids:id,date_from:m.range.start,date_to:shift(m.range.end,1)}));if(!current())return;const v=Array.isArray(response)?response.find(x=>x.item_id===id):response;
+      state.put(visitsKey+id,{total:Number.isFinite(v?.total_visits)?v.total_visits:null,updated:clock(),version:2,reason:v?'':'Sem resposta para este anúncio'});
+     }catch(e){if(/ml_read_(401|429|5\d\d)|ml_read_(timeout|network|io_context)/.test(e.message))throw e;state.put(visitsKey+id,{total:null,updated:clock(),version:2,reason:e.message});}
     }
     m.cursor+=ids.length;if(m.cursor>=m.ids.length){m.finished=true;m.phase='Sincronização concluída';m.completedAt=clock();}
    }

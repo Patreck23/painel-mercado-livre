@@ -24,7 +24,7 @@ test('durable ML sync survives restart, caches API calls, updates cancellation a
   if(path.startsWith('users/'))return {paging:{total:1},results:['MLB1']};
   if(path.startsWith('items/bulk?'))return [{status_code:200,body:{id:'MLB1',title:'Produto',price,currency_id:'BRL',status:'active',available_quantity:10,pictures:[{secure_url:'https://http2.mlstatic.com/test.jpg'}]}}];
   if(path==='item/MLB1/performance')return {score:90,level_wording:'Profissional',buckets:[]};
-  if(path.startsWith('items/visits?'))return [{item_id:'MLB1',total_visits:25}];throw Error('unexpected_request');
+  if(path.startsWith('items/visits?')){assert.equal(new URLSearchParams(path.split('?')[1]).get('ids'),'MLB1');return {item_id:'MLB1',total_visits:25};}throw Error('unexpected_request');
  }};
  const range=period(new URLSearchParams({inicio:'2026-11-01',fim:'2026-11-05'}),clock);let a=createMLAnalytics(args);a.get(range,42);
  for(let i=0;i<4;i++){a=createMLAnalytics(args);await a.tick();}

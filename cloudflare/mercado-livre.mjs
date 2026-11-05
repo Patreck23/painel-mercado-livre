@@ -40,7 +40,7 @@ export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clo
     let userCache=state.get('ml-user');
     if(!userCache||clock()-userCache.updated>=1800000){const user=await read('users/me');userCache={user:{id:user.id,nickname:user.nickname,site_id:user.site_id},updated:clock()};state.put('ml-user',userCache);}
     const output=renderML({analytics,url,user:userCache.user,clock});
-    send(res,200,shell(output.body,{title:'Mercado Livre',active:'ml',refresh:output.refresh}).replace('● Bling conectado','Mercado Livre conectado'),{'Set-Cookie':cookie(session)});return true;
+    send(res,200,shell(output.body,{title:'Mercado Livre',active:'ml',refresh:output.refresh}).replace('● Bling conectado','Mercado Livre conectado').replace('Casa Nissi · Bling','Casa Nissi · Mercado Livre'),{'Set-Cookie':cookie(session)});return true;
    }
    if(!configured()){send(res,503,wrap('<h1>Configure as credenciais primeiro</h1><p><a href="/mercado-livre">Voltar à configuração</a></p>'));return true;}
    if(url.pathname==='/auth/mercado-livre/start'){
