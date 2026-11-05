@@ -1,3 +1,4 @@
+import {createQualityResearch} from './ml-quality.mjs';
 import {createMLAnalytics} from './ml-analytics.mjs';
 import {renderML} from './ml-ui.mjs';
 import {persistentMap,sealStore} from './state.mjs';
@@ -26,6 +27,7 @@ export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clo
  async function renew(){if(session.expiresAt>clock()+60000)return session;if(!refreshing)refreshing=token({grant_type:'refresh_token',refresh_token:session.refresh_token}).then(s=>{session=s;sessionStore.set(s);return s;}).finally(()=>refreshing=null);return refreshing;}
  async function read(path){await renew();const response=await apiFetch('https://api.mercadolibre.com/'+path,{headers:{Authorization:'Bearer '+session.access_token,Accept:'application/json'},signal:AbortSignal.timeout(20000)},'read');if(!response.ok)throw Error('ml_read_'+response.status);return json(response,'read');}
  const analytics=createMLAnalytics({state,read,schedule,clock});
+ const research=createQualityResearch({state,read,ai:env.AI,schedule,clock});analytics.research=research;
  const wrap=content=>shell(content,{title:'Mercado Livre',active:'ml',refresh:0}).replace('● Bling conectado','Bling · conexão separada');
  function button(){const ticket=crypto.encrypt({kind:'ml-start',expires:clock()+600000});return '<a class="button primary" href="/auth/mercado-livre/start?ticket='+encodeURIComponent(ticket)+'">'+(session?'Renovar conexão':'Conectar Mercado Livre')+'</a>';}
  const handle=async function(req,res,url){
@@ -57,7 +59,7 @@ export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clo
    send(res,303,'',{Location:'/mercado-livre','Set-Cookie':cookie(session)});return true;
   }catch(error){const code=String(error?.message||'');const safe=/^ml_(token|read)_(\d{3}|network|timeout|io_context|invalid_json)$/.test(code)||code==='ml_invalid_token'?code:'ml_consulta_indisponivel';if(/_(401|400)$/.test(code)){session=null;sessionStore.set(null);}send(res,502,wrap('<h1>Não foi possível concluir a conexão</h1><p>Referência: '+esc(safe)+'</p><p><a class="button" href="/mercado-livre">Voltar à conexão Mercado Livre</a></p>'));return true;}
  };
- handle.alarm=()=>analytics.tick();
+ handle.alarm=async()=>{await analytics.tick();await research.tick();};
  return handle;
 }
 

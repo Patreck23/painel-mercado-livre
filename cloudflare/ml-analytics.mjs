@@ -1,3 +1,4 @@
+import {captureQuality,qualityDeclines} from './ml-quality.mjs';
 const DAY=86400000,TTL=1800000;
 export const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 export const money=n=>Number(n).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
@@ -57,7 +58,7 @@ export function createMLAnalytics({state,read,schedule,clock=()=>Date.now()}){
     }
    }else if(m.stage==='catalog'){
     for(let n=0;n<8;n++){
-     const q=new URLSearchParams({search_type:'scan',limit:'100'});if(m.scroll)q.set('scroll_id',m.scroll);
+     const q=new URLSearchParams({search_type:'scan',limit:'100',status:'active'});if(m.scroll)q.set('scroll_id',m.scroll);
      const response=await read('users/'+m.user+'/items/search?'+q);if(!current())return;const ids=response.results||[];if(!Array.isArray(ids))throw Error('ml_items_invalid');
      m.ids=[...new Set([...m.ids,...ids])];m.scroll=response.scroll_id;m.catalogTotal=response.paging?.total||m.ids.length;
      if(ids.length<100||m.ids.length>=m.catalogTotal||!m.scroll){const sold=state.list(k+'order:').flatMap(([,o])=>o.items.map(i=>i.id));m.ids=[...new Set([...m.ids,...sold])].filter(id=>/^ML[A-Z]\d+$/.test(id));const revenue=new Map();for(const [,o] of state.list(k+'order:'))if(o.status==='paid'&&o.date>=m.range.start)for(const i of o.items)revenue.set(i.id,(revenue.get(i.id)||0)+i.qty*i.price);m.ids.sort((a,b)=>(revenue.get(b)||0)-(revenue.get(a)||0));m.stage='metadata';m.cursor=0;m.phase='Carregando fotos e cadastro dos anúncios';break;}
@@ -78,10 +79,12 @@ export function createMLAnalytics({state,read,schedule,clock=()=>Date.now()}){
      }
     }
     for(const id of ids){
+     if(state.get('ml-item:'+id)?.item.status!=='active')continue;
      let perf=state.get('ml-performance:'+id);if(!perf||clock()-perf.updated>=TTL){try{const p=await read('item/'+id+'/performance');perf={score:Number.isFinite(p.score)?p.score:null,level:p.level_wording||p.level||null,actions:pendingActions(p),calculated:p.calculated_at,updated:clock(),available:true};}catch(e){if(/ml_read_(401|429|5\d\d)|ml_read_(timeout|network|io_context)/.test(e.message))throw e;perf={available:false,reason:e.message,updated:clock()};}if(!current())return;state.put('ml-performance:'+id,perf);}
+     captureQuality(state,id,perf,state.get('ml-item:'+id)?.item);
     }
     const visitsKey=k+'visits:';
-    for(const id of ids){const cached=state.get(visitsKey+id);if(cached?.version===2&&clock()-cached.updated<TTL)continue;
+    for(const id of ids){if(state.get('ml-item:'+id)?.item.status!=='active')continue;const cached=state.get(visitsKey+id);if(cached?.version===2&&clock()-cached.updated<TTL)continue;
      try{const response=await read('items/visits?'+new URLSearchParams({ids:id,date_from:m.range.start,date_to:shift(m.range.end,1)}));if(!current())return;const v=Array.isArray(response)?response.find(x=>x.item_id===id):response;
       state.put(visitsKey+id,{total:Number.isFinite(v?.total_visits)?v.total_visits:null,updated:clock(),version:2,reason:v?'':'Sem resposta para este anúncio'});
      }catch(e){if(/ml_read_(401|429|5\d\d)|ml_read_(timeout|network|io_context)/.test(e.message))throw e;state.put(visitsKey+id,{total:null,updated:clock(),version:2,reason:e.message});}
@@ -91,5 +94,5 @@ export function createMLAnalytics({state,read,schedule,clock=()=>Date.now()}){
   }catch(error){m.error=/^ml_[a-z_]+(?:_\d{3})?$/.test(error.message)?error.message:'ml_consulta_indisponivel';m.finished=true;m.phase='Sincronização interrompida; dados anteriores preservados';}
   if(!current())return;m.updated=clock();state.put(meta(k),m);if(!m.finished)schedule(clock()+1000);else state.delete('ml-active');
  }
- return {get,view,extra(k,id){return {performance:state.get('ml-performance:'+id),visits:state.get(k+'visits:'+id),changes:state.get('ml-changes:'+id)||[]};},tick(){if(!running)running=run().finally(()=>running=null);return running;}};
+ return {get,view,quality:range=>qualityDeclines(state,range,view(key(range),{range,stage:'orders'}).products),extra(k,id){const performance=state.get('ml-performance:'+id);captureQuality(state,id,performance,state.get('ml-item:'+id)?.item);return {performance,visits:state.get(k+'visits:'+id),changes:state.get('ml-changes:'+id)||[]};},tick(){if(!running)running=run().finally(()=>running=null);return running;}};
 }

@@ -21,7 +21,7 @@ test('durable ML sync survives restart, caches API calls, updates cancellation a
  const state=memory();let clock=now,status='paid',price=10,calls=0;
  const args={state,schedule:()=>{},clock:()=>clock,read:async path=>{calls++;
   if(path.startsWith('orders/search?'))return {paging:{total:1},results:[{id:1,date_created:'2026-11-05T12:00:00-03:00',status,currency_id:'BRL',order_items:[{item:{id:'MLB1',title:'Produto'},quantity:2,unit_price:10}]}]};
-  if(path.startsWith('users/'))return {paging:{total:1},results:['MLB1']};
+  if(path.startsWith('users/')){assert.equal(new URLSearchParams(path.split('?')[1]).get('status'),'active');return {paging:{total:1},results:['MLB1']};}
   if(path.startsWith('items/bulk?'))return [{status_code:200,body:{id:'MLB1',title:'Produto',price,currency_id:'BRL',status:'active',available_quantity:10,pictures:[{secure_url:'https://http2.mlstatic.com/test.jpg'}]}}];
   if(path==='item/MLB1/performance')return {score:90,level_wording:'Profissional',buckets:[]};
   if(path.startsWith('items/visits?')){assert.equal(new URLSearchParams(path.split('?')[1]).get('ids'),'MLB1');return {item_id:'MLB1',total_visits:25};}throw Error('unexpected_request');
@@ -39,4 +39,9 @@ test('product UI keeps date filters on details, escapes content and never execut
  const range=period(new URLSearchParams({inicio:'2026-11-01',fim:'2026-11-05'}),now),job={range,finished:true,complete:true,ids:['MLB1'],updated:now};
  const analytics={get:()=>({key:'key',job}),view:()=>({products:[{id:'MLB1',title:'<script>alert(1)</script>',sku:'x',status:'active',qty:1,revenue:10,orderCount:1,average:10,share:1,abc:'A',daily:{},growth:null}],total:10,qty:1,orders:1}),extra:()=>({performance:{available:true,score:0,actions:[{title:'<b>Fix</b>',link:'javascript:alert(1)'}]},changes:[],visits:{total:0}})};
  const output=renderML({analytics,url:new URL('https://example.com/mercado-livre?inicio=2026-11-01&fim=2026-11-05'),user:{id:1,nickname:'CASA'},clock:()=>now});assert.equal(output.refresh,1800);assert.ok(output.body.includes('&lt;script&gt;'));assert.ok(!output.body.includes('javascript:'));assert.ok(output.body.includes('0/100'));assert.ok(output.body.includes('produto=MLB1'));assert.ok(output.body.includes('inicio=2026-11-01'));
+});
+test('inactive listing sales remain in history while quality and visit API calls are skipped',async()=>{
+ const state=memory(),paths=[];const range=period(new URLSearchParams(),now);
+ const a=createMLAnalytics({state,schedule:()=>{},clock:()=>now,read:async path=>{paths.push(path);if(path.startsWith('orders/search?'))return {paging:{total:1},results:[{id:1,status:'paid',date_created:'2026-11-05T12:00:00-03:00',currency_id:'BRL',order_items:[{item:{id:'MLB1',title:'Encerrado'},unit_price:10,quantity:1}]}]};if(path.startsWith('users/'))return {paging:{total:0},results:[]};if(path.startsWith('items/bulk?'))return [{status_code:200,body:{id:'MLB1',title:'Encerrado',status:'closed',price:10}}];throw Error('unexpected_request');}});
+ a.get(range,42);for(let n=0;n<4;n++)await a.tick();const {key,job}=a.get(range,42);assert.equal(job.finished,true);assert.equal(a.view(key,job).total,10);assert.ok(paths.every(p=>!p.includes('/performance')&&!p.startsWith('items/visits?')));
 });
