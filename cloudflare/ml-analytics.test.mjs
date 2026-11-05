@@ -27,10 +27,10 @@ test('durable ML sync survives restart, caches API calls, updates cancellation a
   if(path.startsWith('items/visits?'))return [{item_id:'MLB1',total_visits:25}];throw Error('unexpected_request');
  }};
  const range=period(new URLSearchParams({inicio:'2026-11-01',fim:'2026-11-05'}),clock);let a=createMLAnalytics(args);a.get(range,42);
- for(let i=0;i<3;i++){a=createMLAnalytics(args);await a.tick();}
+ for(let i=0;i<4;i++){a=createMLAnalytics(args);await a.tick();}
  let result=a.get(range,42);assert.equal(result.job.finished,true);assert.equal(a.view(result.key,result.job).total,20);assert.equal(a.extra(result.key,'MLB1').visits.total,25);const before=calls;
  a=createMLAnalytics(args);result=a.get(range,42);await a.tick();assert.equal(calls,before);
- clock+=1800000;status='cancelled';price=12;result=a.get(range,42);assert.equal(a.view(result.key,result.job).total,20);for(let i=0;i<3;i++)await a.tick();result=a.get(range,42);assert.equal(a.view(result.key,result.job).total,0);assert.equal(a.extra(result.key,'MLB1').changes[0].label,'Preço');
+ clock+=1800000;status='cancelled';price=12;result=a.get(range,42);assert.equal(a.view(result.key,result.job).total,20);for(let i=0;i<4;i++)await a.tick();result=a.get(range,42);assert.equal(a.view(result.key,result.job).total,0);assert.equal(a.extra(result.key,'MLB1').changes[0].label,'Preço');
 });
 test('API failures preserve previous data and distinguish unavailable quality from a zero score',async()=>{
  const state=memory(),range=period(new URLSearchParams(),now);const a=createMLAnalytics({state,schedule:()=>{},clock:()=>now,read:async()=>{throw Error('ml_read_403');}});a.get(range,1);await a.tick();const result=a.get(range,1);assert.equal(result.job.error,'ml_read_403');assert.equal(result.job.finished,true);

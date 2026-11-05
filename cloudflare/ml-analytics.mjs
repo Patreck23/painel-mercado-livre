@@ -38,13 +38,14 @@ export function createMLAnalytics({state,read,schedule,clock=()=>Date.now()}){
   if(active&&active!==k){const other=state.get(meta(active));if(other&&!other.finished)return {job:m,waiting:true,key:k};}
   if(!m||m.finished&&clock()-m.updated>=TTL){
    if(active&&active!==k){const other=state.get(meta(active));if(other&&!other.finished)return {job:m,waiting:true,key:k};}
-   m={...m,range,user:String(user),generation:crypto.randomUUID(),stage:'orders',offset:0,cursor:0,ids:[],scroll:null,finished:false,complete:true,error:null,phase:'Carregando vendas do período e da comparação',updated:clock()};state.put(meta(k),m);state.put('ml-active',k);schedule(clock()+100);
+   m={...m,range,user:String(user),generation:crypto.randomUUID(),stage:'orders',offset:0,cursor:0,metadataReady:false,ids:[],scroll:null,finished:false,complete:true,error:null,phase:'Carregando vendas do período e da comparação',updated:clock()};state.put(meta(k),m);state.put('ml-active',k);schedule(clock()+100);
   }else if(!m.finished){state.put('ml-active',k);schedule(clock()+100);}
   return {job:m,key:k};
  }
- function view(k,m){const ids=m.stage==='details'?new Set(m.ids):null;const items=state.list('ml-item:').map(([,v])=>v.item).filter(i=>!ids||ids.has(i.id));const orders=state.list(k+'order:').map(([,v])=>v);return summarize(m,items,orders);}
+ function view(k,m){const ids=['metadata','details'].includes(m.stage)?new Set(m.ids):null;const items=state.list('ml-item:').map(([,v])=>v.item).filter(i=>!ids||ids.has(i.id));const orders=state.list(k+'order:').map(([,v])=>v);return summarize(m,items,orders);}
  async function run(){const k=state.get('ml-active'),m=k&&state.get(meta(k));if(!m||m.finished)return;const current=()=>state.get(meta(k))?.generation===m.generation;
   try{
+   if(m.stage==='details'&&!m.metadataReady){const revenue=new Map();for(const [,o] of state.list(k+'order:'))if(o.status==='paid'&&o.date>=m.range.start)for(const i of o.items)revenue.set(i.id,(revenue.get(i.id)||0)+i.qty*i.price);m.ids.sort((a,b)=>(revenue.get(b)||0)-(revenue.get(a)||0));m.stage='metadata';m.cursor=0;}
    if(m.stage==='orders'){
     for(let n=0;n<8;n++){
      const q=new URLSearchParams({seller:m.user,'order.date_created.from':m.range.previousStart+'T00:00:00.000-03:00','order.date_created.to':shift(m.range.end,1)+'T00:00:00.000-03:00',sort:'date_desc',offset:String(m.offset),limit:'50'});
@@ -59,9 +60,15 @@ export function createMLAnalytics({state,read,schedule,clock=()=>Date.now()}){
      const q=new URLSearchParams({search_type:'scan',limit:'100'});if(m.scroll)q.set('scroll_id',m.scroll);
      const response=await read('users/'+m.user+'/items/search?'+q);if(!current())return;const ids=response.results||[];if(!Array.isArray(ids))throw Error('ml_items_invalid');
      m.ids=[...new Set([...m.ids,...ids])];m.scroll=response.scroll_id;m.catalogTotal=response.paging?.total||m.ids.length;
-     if(ids.length<100||m.ids.length>=m.catalogTotal||!m.scroll){const sold=state.list(k+'order:').flatMap(([,o])=>o.items.map(i=>i.id));m.ids=[...new Set([...m.ids,...sold])].filter(id=>/^ML[A-Z]\d+$/.test(id));m.stage='details';m.phase='Atualizando fotos, anúncios e recomendações';break;}
+     if(ids.length<100||m.ids.length>=m.catalogTotal||!m.scroll){const sold=state.list(k+'order:').flatMap(([,o])=>o.items.map(i=>i.id));m.ids=[...new Set([...m.ids,...sold])].filter(id=>/^ML[A-Z]\d+$/.test(id));const revenue=new Map();for(const [,o] of state.list(k+'order:'))if(o.status==='paid'&&o.date>=m.range.start)for(const i of o.items)revenue.set(i.id,(revenue.get(i.id)||0)+i.qty*i.price);m.ids.sort((a,b)=>(revenue.get(b)||0)-(revenue.get(a)||0));m.stage='metadata';m.cursor=0;m.phase='Carregando fotos e cadastro dos anúncios';break;}
     }
+   }else if(m.stage==='metadata'){
+    m.phase='Carregando fotos e cadastro dos anúncios';
+    const ids=m.ids.slice(m.cursor,m.cursor+40);
+    for(let batch=0;batch<ids.length;batch+=20){const group=ids.slice(batch,batch+20);const response=await read('items/bulk?'+new URLSearchParams({ids:group.join(',')}));if(!current())return;if(!Array.isArray(response))throw Error('ml_items_invalid');for(const entry of response){const raw=entry.body;if((entry.status_code??entry.code)!==200||!raw?.id)continue;const item=metadata(raw),prior=state.get('ml-item:'+item.id)?.item,events=state.get('ml-changes:'+item.id)||[];if(prior)for(const [field,label] of [['title','Título'],['price','Preço'],['status','Situação'],['stock','Estoque informado'],['shipping','Logística']])if(JSON.stringify(prior[field])!==JSON.stringify(item[field]))events.unshift({at:clock(),label,before:prior[field]??null,after:item[field]??null});state.put('ml-changes:'+item.id,events.slice(0,50));state.put('ml-item:'+item.id,{item,updated:clock()});}}
+    m.cursor+=ids.length;if(m.cursor>=m.ids.length){m.metadataReady=true;m.stage='details';m.cursor=0;m.phase='Consultando qualidade, visitas e recomendações oficiais';}
    }else if(m.stage==='details'){
+    m.phase='Consultando qualidade, visitas e recomendações oficiais';
     const ids=m.ids.slice(m.cursor,m.cursor+10),missing=ids.filter(id=>{const c=state.get('ml-item:'+id);return !c||clock()-c.updated>=TTL;});
     if(missing.length){const response=await read('items/bulk?'+new URLSearchParams({ids:missing.join(',')}));if(!current())return;if(!Array.isArray(response))throw Error('ml_items_invalid');
      for(const entry of response){const raw=entry.body;if((entry.status_code??entry.code)!==200||!raw?.id)continue;const item=metadata(raw),prior=state.get('ml-item:'+item.id)?.item,events=state.get('ml-changes:'+item.id)||[];
