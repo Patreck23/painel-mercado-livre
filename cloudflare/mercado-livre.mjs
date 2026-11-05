@@ -8,17 +8,20 @@ export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clo
  let session=sessionStore.get(),refreshing=null;
  const pending=persistentMap(state,'ml-pending:');
  const redirect=base+'/auth/mercado-livre/callback';
- const configured=()=>!!(env.ML_CLIENT_ID&&env.ML_CLIENT_SECRET);
+ const clientId=String(env.ML_CLIENT_ID||'').trim(),clientSecret=String(env.ML_CLIENT_SECRET||'').trim();
+ const configured=()=>!!(clientId&&clientSecret);
+ async function apiFetch(url,options,stage){try{return await fetcher(url,{...options,redirect:'manual'});}catch(error){const message=String(error?.message||'');throw Error('ml_'+stage+'_'+(/different request|I\/O|request context/i.test(message)?'io_context':error?.name==='TimeoutError'?'timeout':'network'));}}
+ async function json(response,stage){try{return await response.json();}catch{throw Error('ml_'+stage+'_invalid_json');}}
  const cookie=s=>cookieName+'='+encodeURIComponent(crypto.encrypt(s))+'; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000';
  function restore(req){if(session)return;try{const raw=(req.headers.cookie||'').split(';').map(s=>s.trim()).find(s=>s.startsWith(cookieName+'='));if(raw){const data=crypto.decrypt(decodeURIComponent(raw.slice(cookieName.length+1)));if(data.kind==='mercado-livre'&&data.sessionExpires>clock())session=data;sessionStore.set(session);}}catch{}}
  async function token(params){
-  const response=await fetcher('https://api.mercadolibre.com/oauth/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:new URLSearchParams({client_id:env.ML_CLIENT_ID,client_secret:env.ML_CLIENT_SECRET,...params}),signal:AbortSignal.timeout(20000),redirect:'error'});
+  const response=await apiFetch('https://api.mercadolibre.com/oauth/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:new URLSearchParams({client_id:clientId,client_secret:clientSecret,...params}).toString(),signal:AbortSignal.timeout(20000)},'token');
   if(!response.ok)throw Error('ml_token_'+response.status);
-  const data=await response.json();if(typeof data.access_token!=='string'||typeof data.refresh_token!=='string'||!(Number(data.expires_in)>0))throw Error('ml_invalid_token');
+  const data=await json(response,'token');if(typeof data.access_token!=='string'||typeof data.refresh_token!=='string'||!(Number(data.expires_in)>0))throw Error('ml_invalid_token');
   return {kind:'mercado-livre',access_token:data.access_token,refresh_token:data.refresh_token,user_id:data.user_id,expiresAt:clock()+Number(data.expires_in)*1000,sessionExpires:clock()+30*86400000};
  }
  async function renew(){if(session.expiresAt>clock()+60000)return session;if(!refreshing)refreshing=token({grant_type:'refresh_token',refresh_token:session.refresh_token}).then(s=>{session=s;sessionStore.set(s);return s;}).finally(()=>refreshing=null);return refreshing;}
- async function read(path){await renew();const response=await fetcher('https://api.mercadolibre.com/'+path,{headers:{Authorization:'Bearer '+session.access_token,Accept:'application/json'},signal:AbortSignal.timeout(20000),redirect:'error'});if(!response.ok)throw Error('ml_read_'+response.status);return response.json();}
+ async function read(path){await renew();const response=await apiFetch('https://api.mercadolibre.com/'+path,{headers:{Authorization:'Bearer '+session.access_token,Accept:'application/json'},signal:AbortSignal.timeout(20000)},'read');if(!response.ok)throw Error('ml_read_'+response.status);return json(response,'read');}
  const wrap=content=>shell(content,{title:'Mercado Livre',active:'ml',refresh:0}).replace('● Bling conectado','Bling · conexão separada');
  function button(){const ticket=crypto.encrypt({kind:'ml-start',expires:clock()+600000});return '<a class="button primary" href="/auth/mercado-livre/start?ticket='+encodeURIComponent(ticket)+'">'+(session?'Renovar conexão':'Conectar Mercado Livre')+'</a>';}
  return async function handle(req,res,url){
@@ -38,7 +41,7 @@ export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clo
     let ticket;try{ticket=crypto.decrypt(url.searchParams.get('ticket')||'');}catch{}
     if(req.headers['sec-fetch-site']==='cross-site'||ticket?.kind!=='ml-start'||!(ticket.expires>clock())){send(res,403,wrap('<p>Link de conexão expirado. <a href="/mercado-livre">Abra a aba e tente novamente.</a></p>'));return true;}
     const state=nonce(),verifier=nonce();pending.set(state,{verifier,expires:clock()+600000});
-    const query=new URLSearchParams({response_type:'code',client_id:env.ML_CLIENT_ID,redirect_uri:redirect,state,code_challenge: createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256'});
+    const query=new URLSearchParams({response_type:'code',client_id:clientId,redirect_uri:redirect,state,code_challenge: createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256'});
     send(res,303,'',{Location:'https://auth.mercadolivre.com.br/authorization?'+query});return true;
    }
    const state=url.searchParams.get('state'),attempt=pending.get(state);pending.delete(state);
@@ -46,7 +49,7 @@ export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clo
    session=await token({grant_type:'authorization_code',code:url.searchParams.get('code'),redirect_uri:redirect,code_verifier:attempt.verifier});
    sessionStore.set(session);
    send(res,303,'',{Location:'/mercado-livre','Set-Cookie':cookie(session)});return true;
-  }catch(error){const code=String(error?.message||'');const safe=/^ml_(token|read)_\d{3}$/.test(code)?code:'ml_consulta_indisponivel';if(/_(401|400)$/.test(code)){session=null;sessionStore.set(null);}send(res,502,wrap('<h1>Não foi possível concluir a conexão</h1><p>Referência: '+esc(safe)+'</p><p><a class="button" href="/mercado-livre">Voltar à conexão Mercado Livre</a></p>'));return true;}
+  }catch(error){const code=String(error?.message||'');const safe=/^ml_(token|read)_(\d{3}|network|timeout|io_context|invalid_json)$/.test(code)||code==='ml_invalid_token'?code:'ml_consulta_indisponivel';if(/_(401|400)$/.test(code)){session=null;sessionStore.set(null);}send(res,502,wrap('<h1>Não foi possível concluir a conexão</h1><p>Referência: '+esc(safe)+'</p><p><a class="button" href="/mercado-livre">Voltar à conexão Mercado Livre</a></p>'));return true;}
  };
 }
 

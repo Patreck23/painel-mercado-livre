@@ -57,3 +57,9 @@ test('30-minute sync preserves loaded products and fetches only new or changed s
  assert.equal(app.get(30).job.orders.length,1);for(let i=0;i<3;i++)await app.tick();assert.equal(details,2);assert.equal(aggregate(app.get(30).job.orders,app.get(30).job.range).total,30);
  now+=1800000;rows[0].situacao.id=2;app.get(30);for(let i=0;i<3;i++)await app.tick();assert.equal(details,3);assert.equal(aggregate(app.get(30).job.orders,app.get(30).job.range).total,20);
 });
+test('Mercado Livre serializes token exchange and reports safe network failures',async()=>{
+ const state=memory(),env={ML_CLIENT_ID:' app\n',ML_CLIENT_SECRET:' secret\n',APP_BASE_URL:'https://painel.example.workers.dev'};
+ const app=createApp({state,env,fetcher:async(url,options)=>{assert.equal(typeof options.body,'string');const params=new URLSearchParams(options.body);assert.equal(params.get('client_id'),'app');assert.equal(params.get('client_secret'),'secret');assert.equal(options.redirect,'manual');throw Error('upstream private details');}});
+ const home=await request(app,'/mercado-livre'),link=home.body.match(/href="(\/auth\/mercado-livre\/start\?ticket=[^"]+)"/)[1],start=await request(app,link),auth=new URL(start.headers.Location);assert.equal(auth.searchParams.get('client_id'),'app');
+ const result=await request(app,'/auth/mercado-livre/callback?state='+auth.searchParams.get('state')+'&code=private-code');assert.equal(result.status,502);assert.ok(result.body.includes('ml_token_network'));assert.ok(!result.body.includes('private-code'));assert.ok(!result.body.includes('upstream private details'));
+});
