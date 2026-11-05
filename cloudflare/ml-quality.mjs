@@ -24,11 +24,11 @@ export function qualityDeclines(state,range,products,{activeOnly=true}={}){
 const safeCode=error=>/^ml_[a-z_]+(?:_\d{3})?$/.test(error?.message||'')?error.message:'consulta_indisponivel';
 export function createQualityResearch({state,read,ai,schedule,clock=()=>Date.now()}){
  const reportKey=row=>'ml-quality-report:'+row.signature;
- function queue(rows){const pending=state.get('ml-quality-queue')||[];for(const r of rows){const report=state.get(reportKey(r));if(report&&clock()-report.updated<86400000)continue;if(!pending.some(p=>p.signature===r.signature))pending.push({id:r.id,signature:r.signature,previous:r.previous,current:r.current,newActions:r.newActions,product:{id:r.id,title:r.product.title,catalog:r.product.catalog,price:r.product.price,status:r.product.status,link:r.product.link}});}
+ function queue(rows){const pending=state.get('ml-quality-queue')||[];for(const r of rows){const report=state.get(reportKey(r));if(report&&clock()-report.updated<(report.status==='researching'?300000:86400000))continue;if(!pending.some(p=>p.signature===r.signature))pending.push({id:r.id,signature:r.signature,previous:r.previous,current:r.current,newActions:r.newActions,product:{id:r.id,title:r.product.title,catalog:r.product.catalog,price:r.product.price,status:r.product.status,link:r.product.link}});}
   if(pending.length){state.put('ml-quality-queue',pending.slice(0,20));schedule(clock()+1000);}
  }
  async function tick(){const queue=state.get('ml-quality-queue')||[];if(!queue.length)return;const row=queue.shift();state.put('ml-quality-queue',queue);const key=reportKey(row),now=clock(),sources=[{title:'Qualidade e recomendações oficiais do anúncio',url:'https://api.mercadolibre.com/item/'+row.id+'/performance',at:row.current.observedAt}];
-  let report={updated:now,status:'researching',sources,competition:null};
+  let report={updated:now,status:'researching',sources,competition:null};state.put(key,report);
   try{
    // Research is current marketplace evidence, never a guessed historical market change.
    try{const p=await read('items/'+row.id+'/price_to_win?version=v2');report.competition={available:true,status:p.status||null,currency:p.currency_id||null,current_price:p.current_price??null,price_to_win:p.price_to_win??null,reasons:p.reason||[],winner:p.winner?{id:p.winner.item_id,price:p.winner.price,currency:p.winner.currency_id,boosts:p.winner.boosts||[]}:null,boosts:p.boosts||[],observedAt:clock()};sources.push({title:'Concorrência atual no catálogo Mercado Livre',url:'https://api.mercadolibre.com/items/'+row.id+'/price_to_win?version=v2',at:clock()});}

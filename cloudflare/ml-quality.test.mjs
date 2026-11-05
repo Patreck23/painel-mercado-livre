@@ -36,3 +36,8 @@ test('empty-history UI and generated text escape untrusted content',()=>{
  const html=renderQualityDeclines({comparison,range,link:()=>'/mercado-livre',photo:()=>'',research:{report:()=>({status:'ready',updated:at('2026-11-05'),hypotheses:['<img onerror=bad>'],nextSteps:[],limitations:'Não confirmada',sources:[]})}});assert.ok(!html.includes('<script>'));assert.ok(html.includes('&lt;script&gt;'));assert.ok(html.includes('não são causas confirmadas'));
  const empty=renderQualityDeclines({comparison:{rows:[],total:0,compared:0,eligible:10,missing:10},range,link:()=>'',photo:()=>''});assert.ok(empty.includes('Estamos formando o histórico'));assert.ok(!empty.includes('Nenhuma queda confirmada entre'));
 });
+test('opening the page during an in-flight report does not queue duplicate AI work',async()=>{
+ const s=memory(),row=decline(s);let release;const gate=new Promise(resolve=>release=resolve);
+ const research=createQualityResearch({state:s,schedule:()=>{},clock:()=>at('2026-11-05'),read:async()=>{await gate;return {status:'winning'};},ai:{run:async()=>({response:{hypotheses:[],next_steps:[],limitations:'Sem causa confirmada.'}})}});
+ research.queue([row]);const running=research.tick();research.queue([row]);assert.equal(s.get('ml-quality-queue').length,0);release();await running;assert.equal(research.report(row).status,'ready');assert.equal(s.get('ml-quality-ai-budget:2026-11-05'),1);
+});
