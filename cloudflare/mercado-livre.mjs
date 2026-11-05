@@ -1,10 +1,13 @@
+import {createMLAnalytics} from './ml-analytics.mjs';
+import {renderML} from './ml-ui.mjs';
 import {persistentMap,sealStore} from './state.mjs';
 import {randomBytes,createHash} from 'node:crypto';
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const nonce=()=>randomBytes(32).toString('base64url');
 const cookieName='__Host-nissi-ml';
-export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clock=()=>Date.now(),state}){
+export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clock=()=>Date.now(),state,schedule=()=>{}}){
  const sessionStore=sealStore(state,crypto,'ml-session');
+ const clearUser=()=>state.delete('ml-user');
  let session=sessionStore.get(),refreshing=null;
  const pending=persistentMap(state,'ml-pending:');
  const redirect=base+'/auth/mercado-livre/callback';
@@ -22,9 +25,10 @@ export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clo
  }
  async function renew(){if(session.expiresAt>clock()+60000)return session;if(!refreshing)refreshing=token({grant_type:'refresh_token',refresh_token:session.refresh_token}).then(s=>{session=s;sessionStore.set(s);return s;}).finally(()=>refreshing=null);return refreshing;}
  async function read(path){await renew();const response=await apiFetch('https://api.mercadolibre.com/'+path,{headers:{Authorization:'Bearer '+session.access_token,Accept:'application/json'},signal:AbortSignal.timeout(20000)},'read');if(!response.ok)throw Error('ml_read_'+response.status);return json(response,'read');}
+ const analytics=createMLAnalytics({state,read,schedule,clock});
  const wrap=content=>shell(content,{title:'Mercado Livre',active:'ml',refresh:0}).replace('● Bling conectado','Bling · conexão separada');
  function button(){const ticket=crypto.encrypt({kind:'ml-start',expires:clock()+600000});return '<a class="button primary" href="/auth/mercado-livre/start?ticket='+encodeURIComponent(ticket)+'">'+(session?'Renovar conexão':'Conectar Mercado Livre')+'</a>';}
- return async function handle(req,res,url){
+ const handle=async function(req,res,url){
   if(!['/mercado-livre','/auth/mercado-livre/start','/auth/mercado-livre/callback'].includes(url.pathname))return false;
   if(req.method!=='GET'){send(res,405,'Método não permitido');return true;}
   restore(req);for(const [key,value] of pending)if(value.expires<clock())pending.delete(key);
@@ -33,8 +37,10 @@ export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clo
     const heading='<div class="heading"><div><div class="eyebrow">Casa Nissi · integração direta</div><h1>Mercado Livre</h1><p class="muted">Conexão independente do Bling, no mesmo dashboard.</p></div><span class="tag">'+(session?'Conta autorizada':'Aguardando autorização')+'</span></div>';
     if(!configured()){send(res,200,wrap(heading+'<article class="card"><h2>Ativar a conexão</h2><p>Cadastre a aplicação na conta Mercado Livre da Casa Nissi e configure as credenciais nos Secrets da Cloudflare.</p><p><a class="button primary" href="https://developers.mercadolivre.com.br/devcenter" target="_blank" rel="noopener noreferrer">Abrir aplicações do Mercado Livre</a></p><p>URL de redirecionamento:</p><code style="overflow-wrap:anywhere">'+esc(redirect)+'</code><p>Secrets na Cloudflare: <strong>ML_CLIENT_ID</strong> e <strong>ML_CLIENT_SECRET</strong>.</p><p class="muted">Use Authorization Code, habilite PKCE e acesso de leitura e offline, quando disponíveis. Após salvar os Secrets e publicar, volte a esta aba para autorizar a conta.</p></article>'));return true;}
     if(!session){send(res,200,wrap(heading+'<article class="card"><h2>Autorizar a Casa Nissi</h2><p>Entre com a conta correta no Mercado Livre e confirme o acesso solicitado pela aplicação.</p>'+button()+'</article>'));return true;}
-    const user=await read('users/me');
-    send(res,200,wrap(heading+'<section class="kpis"><article class="kpi"><span class="label">Conta conectada</span><strong style="font-size:23px">'+esc(user.nickname)+'</strong><small>Vendedor '+esc(user.id)+'</small></article><article class="kpi"><span class="label">País / site</span><strong>'+esc(user.site_id)+'</strong><small>Identidade confirmada pela API</small></article></section><article class="card"><h2>Conexão confirmada</h2><p>A conta foi autorizada e a consulta ao Mercado Livre funcionou. As análises de anúncios, visitas, vendas e Full serão adicionadas a partir desta conexão; ainda não há indicadores calculados nesta aba.</p>'+button()+'</article>'),{'Set-Cookie':cookie(session)});return true;
+    let userCache=state.get('ml-user');
+    if(!userCache||clock()-userCache.updated>=1800000){const user=await read('users/me');userCache={user:{id:user.id,nickname:user.nickname,site_id:user.site_id},updated:clock()};state.put('ml-user',userCache);}
+    const output=renderML({analytics,url,user:userCache.user,clock});
+    send(res,200,shell(output.body,{title:'Mercado Livre',active:'ml',refresh:output.refresh}).replace('● Bling conectado','Mercado Livre conectado'),{'Set-Cookie':cookie(session)});return true;
    }
    if(!configured()){send(res,503,wrap('<h1>Configure as credenciais primeiro</h1><p><a href="/mercado-livre">Voltar à configuração</a></p>'));return true;}
    if(url.pathname==='/auth/mercado-livre/start'){
@@ -44,12 +50,14 @@ export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clo
     const query=new URLSearchParams({response_type:'code',client_id:clientId,redirect_uri:redirect,state,code_challenge: createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256'});
     send(res,303,'',{Location:'https://auth.mercadolivre.com.br/authorization?'+query});return true;
    }
-   const state=url.searchParams.get('state'),attempt=pending.get(state);pending.delete(state);
+   const oauthState=url.searchParams.get('state'),attempt=pending.get(oauthState);pending.delete(oauthState);
    if(!attempt||attempt.expires<clock()||url.searchParams.has('error')||!url.searchParams.get('code')){send(res,400,wrap('<h1>Autorização não concluída</h1><p><a href="/mercado-livre">Voltar e tentar novamente</a></p>'));return true;}
    session=await token({grant_type:'authorization_code',code:url.searchParams.get('code'),redirect_uri:redirect,code_verifier:attempt.verifier});
-   sessionStore.set(session);
+   sessionStore.set(session);clearUser();
    send(res,303,'',{Location:'/mercado-livre','Set-Cookie':cookie(session)});return true;
   }catch(error){const code=String(error?.message||'');const safe=/^ml_(token|read)_(\d{3}|network|timeout|io_context|invalid_json)$/.test(code)||code==='ml_invalid_token'?code:'ml_consulta_indisponivel';if(/_(401|400)$/.test(code)){session=null;sessionStore.set(null);}send(res,502,wrap('<h1>Não foi possível concluir a conexão</h1><p>Referência: '+esc(safe)+'</p><p><a class="button" href="/mercado-livre">Voltar à conexão Mercado Livre</a></p>'));return true;}
  };
+ handle.alarm=()=>analytics.tick();
+ return handle;
 }
 

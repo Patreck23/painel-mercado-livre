@@ -45,7 +45,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
   // The already-configured server-side client secret supplies key material.
   // Key derivation is domain-separated from the Bling credential itself.
   const crypto=vault(env.SESSION_SECRET||env.BLING_CLIENT_SECRET||env.ML_CLIENT_SECRET||randomBytes(32));
-  const mercadoLivre=createMercadoLivre({env,base,crypto,send,shell,fetcher,clock,state});
+  const mercadoLivre=createMercadoLivre({env,base,crypto,send,shell,fetcher,clock,state,schedule});
   const usedStates=persistentMap(state,'bling-used:'),pendingStates=persistentMap(state,'bling-pending:'),renewals=new Map();
   const sessionStore=sealStore(state,crypto,'bling-session');
   let sharedSession=sessionStore.get();
@@ -97,7 +97,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
       for(const [k,v] of pendingStates)if(v<=clock())pendingStates.delete(k);
       for(const [k,v] of renewals)if(v.until<=clock())renewals.delete(k);
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
-      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'1.0.3-cloudflare'}),{'Content-Type':'application/json'});
+      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'1.1.0-cloudflare'}),{'Content-Type':'application/json'});
       if(!['GET','POST'].includes(req.method))return send(res,405,'Método não permitido',{Allow:'GET, POST'});
       if(await mercadoLivre(req,res,url))return;
       if(!env.BLING_CLIENT_ID||!env.BLING_CLIENT_SECRET)return send(res,200,page('<h2>Bem-vindo ao Painel Casa Nissi</h2><p>O dashboard está online na Cloudflare.</p><p><a href="/mercado-livre">Conectar Mercado Livre</a></p><p>Para ativar também o Bling, configure BLING_CLIENT_ID e BLING_CLIENT_SECRET nos Secrets deste Worker.</p>'));
@@ -214,6 +214,6 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
       return send(res,502,page('<p>Referência da consulta: '+safeCode+'</p>'+'<p>Não foi possível concluir a consulta ou autorização. <a href="/">Volte ao início</a> e tente novamente. Se persistir, informe apenas esta mensagem; não compartilhe códigos nem chaves.</p>'));
     }
   };
-  handler.alarm=()=>analytics.tick();
+  handler.alarm=async()=>{await mercadoLivre.alarm();await analytics.tick();};
   return handler;
 }

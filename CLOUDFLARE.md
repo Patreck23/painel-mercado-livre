@@ -71,3 +71,9 @@ npm run dev
 `npm run check` empacota o Worker sem publicar. Para publicar pela CLI já autenticada na sua conta: `npm run deploy`.
 
 Os tokens são criptografados antes de serem gravados. O armazenamento de progresso usa um documento por pedido e não depende da memória do processo. Consultas respeitam uma fila entre chamadas ao Bling. Dados são por empresa, sem presumir códigos de canais ou de cancelamentos. Produtos não são automaticamente agrupados com vendas diretas do Mercado Livre, evitando duplicar vendas que já vieram pelo Bling.
+
+### Mercado Livre product analytics
+
+The Mercado Livre tab now imports real seller orders and listings in durable, bounded alarm batches. Select an inclusive start/end date (up to 150 days) and compare with the preceding equally sized period. Cards aggregate variants by listing ID, show paid item revenue, units, weighted selling price, daily revenue, portfolio-wide ABC, visits when authorized, and current official `/item/{id}/performance` quality/actions. Current metadata/quality are explicitly separated from historical sales. Listing snapshots record observed title/price/status/stock/logistics changes from installation onward; no historical changes are fabricated. The API's unavailable resources are labeled unavailable, not zero.
+
+Orders are normalized without buyer/payment personal details. Catalog metadata is fetched using the current `/items/bulk` endpoint and seller scan pagination. A 30-minute persistent cache serves filters without restarting the import; stale periods preserve loaded data during synchronization. Sales pagination beyond the 10,000 order search cap is marked partial; ABC is provisional until all queries succeed. Gross paid item amounts exclude freight and do not claim net revenue, refunded totals, profit or official conversion. No listing writes are performed.
