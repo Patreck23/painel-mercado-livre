@@ -29,7 +29,10 @@ export class CasaNissiDashboard {
   const responseHeaders=new Headers();for(const [key,value] of Object.entries(outHeaders)){for(const item of Array.isArray(value)?value:[value])responseHeaders.append(key,item);}
   return new Response(request.method==='HEAD'?null:content,{status,headers:responseHeaders});
  }
- async alarm(){this.init();await this.app.alarm();}
+ async alarm(){
+  // Rehydrate each bounded alarm from durable state instead of retaining a long-lived importer closure.
+  this.app=null;this.init();await this.app.alarm();
+ }
 }
 export default {
  async fetch(request,env){

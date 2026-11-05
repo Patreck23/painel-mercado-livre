@@ -97,7 +97,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
       for(const [k,v] of pendingStates)if(v<=clock())pendingStates.delete(k);
       for(const [k,v] of renewals)if(v.until<=clock())renewals.delete(k);
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
-      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'1.1.0-cloudflare'}),{'Content-Type':'application/json'});
+      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'1.1.1-cloudflare'}),{'Content-Type':'application/json'});
       if(!['GET','POST'].includes(req.method))return send(res,405,'Método não permitido',{Allow:'GET, POST'});
       if(await mercadoLivre(req,res,url))return;
       if(!env.BLING_CLIENT_ID||!env.BLING_CLIENT_SECRET)return send(res,200,page('<h2>Bem-vindo ao Painel Casa Nissi</h2><p>O dashboard está online na Cloudflare.</p><p><a href="/mercado-livre">Conectar Mercado Livre</a></p><p>Para ativar também o Bling, configure BLING_CLIENT_ID e BLING_CLIENT_SECRET nos Secrets deste Worker.</p>'));
