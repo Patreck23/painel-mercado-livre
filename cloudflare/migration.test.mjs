@@ -27,14 +27,14 @@ test('product import resumes across restarts in batches without double counting'
  const summaries=Array.from({length:31},(_,i)=>({id:i+1,data:'2026-11-03',situacao:{id:i===30?2:1}}));
  const args={state,clock,schedule:t=>schedules.push(t),request:async resource=>{if(resource.startsWith('pedidos/vendas?'))return {data:summaries};details++;const id=Number(resource.split('/').at(-1));return {data:{...summaries[id-1],itens:[{produto:{id:7},descricao:'Produto real',quantidade:1,valor:10}],loja:{id:3}}};},channels:async()=>({mapping:new Map([['3',{name:'Site',group:'Site'}]]),complete:true}),classifyOrders:async orders=>({mapping:new Map([['1',{known:true,name:'Atendido',cancelled:false}],['2',{known:true,name:'Cancelado',cancelled:true}]]),unknown:[],accepted:orders.filter(o=>o.id!==31),cancelled:orders.filter(o=>o.id===31)})};
  let analytics=createPersistentAnalytics(args);analytics.get(30);
- for(let n=0;n<4;n++){analytics=createPersistentAnalytics(args);await analytics.tick();}
+ for(let n=0;n<12;n++){analytics=createPersistentAnalytics(args);await analytics.tick();}
  const job=analytics.get(30).job;assert.equal(job.finished,true);assert.equal(job.orders.length,31);assert.equal(details,31);assert.equal(aggregate(job.orders,job.range).total,300);assert.equal(job.cancelledCount,1);assert.ok(schedules.length>=4);await analytics.tick();assert.equal(details,31);
 });
 test('Bling 401 triggers one token renewal and persists the replacement',async()=>{
  const state=memory(),env={BLING_CLIENT_ID:'client',BLING_CLIENT_SECRET:'secret',APP_BASE_URL:'https://painel.example.workers.dev'};let exchanges=0;
  const fetcher=async(url,options)=>{if(url.includes('/oauth/token')){exchanges++;return {ok:true,json:async()=>({access_token:'token-'+exchanges,refresh_token:'refresh-'+exchanges,expires_in:3600})};}if(options.headers.Authorization==='Bearer token-1')return {ok:false,status:401};if(url.includes('/situacoes/'))return {ok:true,json:async()=>({data:{nome:'Atendido',idHerdado:0}})};if(url.includes('/canais-venda'))return {ok:true,json:async()=>({data:[]})};return {ok:true,json:async()=>({data:[]})};};
  const app=createApp({state,env,fetcher}),home=await request(app,'/'),link=home.body.match(/href="(\/auth\/bling\/start\?ticket=[^"]+)"/)[1],start=await request(app,link),auth=new URL(start.headers.Location);
- await request(app,'/auth/bling/callback?state='+auth.searchParams.get('state')+'&code=example');const overview=await request(app,'/visao-geral');assert.equal(overview.status,200);assert.equal(exchanges,2);
+ await request(app,'/auth/bling/callback?state='+auth.searchParams.get('state')+'&code=example');const overview=await request(app,'/pedidos');assert.equal(overview.status,200);assert.equal(exchanges,2);
  const restarted=createApp({state,env,fetcher});assert.equal((await request(restarted,'/pedidos')).status,200);assert.equal(exchanges,2);
 });
 test('callback reports a safe token diagnostic without leaking credentials or authorization code',async()=>{
@@ -51,11 +51,11 @@ test('30-minute sync preserves loaded products and fetches only new or changed s
  const state=memory();let now=Date.parse('2026-11-03T15:00:00Z'),details=0;
  let rows=[{id:1,data:'2026-11-03',total:10,situacao:{id:1}}];
  const args={state,clock:()=>now,schedule:()=>{},channels:async()=>({mapping:new Map(),complete:true}),classifyOrders:async()=>({mapping:new Map([['1',{cancelled:false}],['2',{cancelled:true}]]),unknown:[],cancelled:rows.filter(o=>o.situacao.id===2)}),request:async path=>{if(path.includes('?'))return {data:rows};details++;const row=rows.find(o=>String(o.id)===path.split('/').at(-1));return {data:{...row,itens:[{produto:{id:7},descricao:'Produto',quantidade:1,valor:row.total}]}};}};
- let app=createPersistentAnalytics(args);app.get(30);for(let i=0;i<3;i++)await app.tick();assert.equal(details,1);
+ let app=createPersistentAnalytics(args);app.get(30);for(let i=0;i<12;i++)await app.tick();assert.equal(details,1);
  app=createPersistentAnalytics(args);assert.equal(app.get(30).job.finished,true);await app.tick();assert.equal(details,1);
  now+=1800000;rows.push({id:2,data:'2026-11-03',total:20,situacao:{id:1}});
- assert.equal(app.get(30).job.orders.length,1);for(let i=0;i<3;i++)await app.tick();assert.equal(details,2);assert.equal(aggregate(app.get(30).job.orders,app.get(30).job.range).total,30);
- now+=1800000;rows[0].situacao.id=2;app.get(30);for(let i=0;i<3;i++)await app.tick();assert.equal(details,3);assert.equal(aggregate(app.get(30).job.orders,app.get(30).job.range).total,20);
+ assert.equal(app.get(30).job.orders.length,1);for(let i=0;i<12;i++)await app.tick();assert.equal(details,2);assert.equal(aggregate(app.get(30).job.orders,app.get(30).job.range).total,30);
+ now+=1800000;rows[0].situacao.id=2;app.get(30);for(let i=0;i<12;i++)await app.tick();assert.equal(details,3);assert.equal(aggregate(app.get(30).job.orders,app.get(30).job.range).total,20);
 });
 test('Mercado Livre serializes token exchange and reports safe network failures',async()=>{
  const state=memory(),env={ML_CLIENT_ID:' app\n',ML_CLIENT_SECRET:' secret\n',APP_BASE_URL:'https://painel.example.workers.dev'};

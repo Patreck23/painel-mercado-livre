@@ -1,21 +1,17 @@
+import {createDocumentState} from './document-state.mjs';
 import {createApp} from './app.mjs';
 export class CasaNissiDashboard {
  constructor(ctx,env){
   this.ctx=ctx;this.env=env;this.app=null;this.origin=null;
   ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS documents (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
-  this.state={
-   get:key=>{const rows=ctx.storage.sql.exec('SELECT value FROM documents WHERE key = ?',key).toArray();return rows.length?JSON.parse(rows[0].value):undefined;},
-   put:(key,value)=>ctx.storage.sql.exec('INSERT INTO documents(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',key,JSON.stringify(value)),
-   delete:key=>ctx.storage.sql.exec('DELETE FROM documents WHERE key = ?',key),
-   list:prefix=>ctx.storage.sql.exec('SELECT key,value FROM documents WHERE key >= ? AND key < ? ORDER BY key',prefix,prefix+'\uffff').toArray().map(row=>[row.key,JSON.parse(row.value)])
-  };
+  this.state=createDocumentState(ctx.storage.sql);
  }
  init(origin){
   if(this.app)return;
   // Canonical origin comes from the Worker entry point, never a caller header.
   this.origin=this.env.APP_BASE_URL||origin||this.state.get('app-origin');
   if(!this.origin)throw Error('missing_origin');this.state.put('app-origin',this.origin);
-  this.app=createApp({env:{...this.env,APP_BASE_URL:this.origin},state:this.state,schedule:when=>this.ctx.waitUntil(this.ctx.storage.setAlarm(when))});
+  this.app=createApp({env:{...this.env,APP_BASE_URL:this.origin},state:this.state,schedule:when=>this.ctx.waitUntil(this.schedule(when))});
  }
  async fetch(request){
   this.init(new URL(request.url).origin);
@@ -29,10 +25,12 @@ export class CasaNissiDashboard {
   const responseHeaders=new Headers();for(const [key,value] of Object.entries(outHeaders)){for(const item of Array.isArray(value)?value:[value])responseHeaders.append(key,item);}
   return new Response(request.method==='HEAD'?null:content,{status,headers:responseHeaders});
  }
- async alarm(){
-  // Rehydrate each bounded alarm from durable state instead of retaining a long-lived importer closure.
-  this.app=null;this.init();await this.app.alarm();
+ async schedule(when){
+  const at=Math.max(Date.now()+5000,when),pending=await this.ctx.storage.getAlarm();
+  if(pending===null||pending<=Date.now()||at<pending)await this.ctx.storage.setAlarm(at);
  }
+ async alarm(){this.init();await this.app.alarm();}
+
 }
 export default {
  async fetch(request,env){

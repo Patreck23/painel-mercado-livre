@@ -51,7 +51,7 @@ A aba Mercado Livre confirma a conta autorizada por `/users/me`. As análises es
 
 ## Verificar antes de aposentar o Render
 
-1. `/health` deve mostrar `1.0.0-cloudflare`.
+1. `/health` deve mostrar `2.0.0-cloudflare`.
 2. Confira o apelido da conta após autorizar Mercado Livre.
 3. Confira as vendas e cancelados do mesmo período no Bling.
 4. Abra o painel em outro navegador para confirmar o acesso compartilhado.
@@ -85,3 +85,17 @@ Active listings are now the default card filter and catalog scan target. Histori
 The section below the cards ranks up to 10 active listings with a real decline between the last quality observation in each of the two selected periods. Daily snapshots are timestamped when the API was actually read; an old `calculated_at` is never presented as a historical observation. Missing baseline, no decline, and zero score are distinct states. Ranking is independent of card pagination and text filters.
 
 AI research uses the Cloudflare `AI` binding and `@cf/meta/llama-3.1-8b-instruct`. It queries the current Mercado Livre catalog competition endpoint and separates official new pending actions from generated hypotheses and suggested checks. It does not claim general internet search or invent a historical market/algorithm change. Non-catalog or unauthorized competition is explicitly unavailable. Sources and retrieval dates accompany each report. Inference is limited to ten new reports per Brasília day, maximum 650 output tokens per call, and cached per evidence signature for 24 hours. Invalid AI responses and missing bindings remain visible as unavailable, never templated text labeled as completed AI. No changes are made to listings. No buyer details, tokens, or secrets are sent to the model.
+
+
+## Atualização econômica e navegação (2.0)
+
+- Início: dois cartões independentes de hoje, Bling e Mercado Livre. Não somar as fontes, pois pedidos do ML podem estar também no Bling.
+- Bling: resumo simples, filtros e melhores produtos; análise detalhada preservada em `/analises`.
+- Análise do mês anterior: fonte e mês fechado, comparação com o mês calendário anterior. Receita sem frete não é lucro líquido. Frete ausente não vira zero; qualidade histórica ausente não é reconstruída.
+- Pedidos persistem por ID; períodos salvos são reutilizados entre páginas e reinícios. Intervalos ausentes são importados uma vez. Atualizações usam os filtros oficiais de última alteração, com sobreposição de cinco minutos, incluindo cancelamentos e correções de pedidos antigos.
+- Durante uso, atualização de vendas a cada 30 minutos; página em importação pode acompanhar o progresso a cada minuto. Não são feitas sincronizações completas de catálogo a cada atualização de tela.
+- ML: conferir lista de anúncios ativos no máximo diariamente; metadados gerais têm validade de sete dias, anúncios envolvidos em vendas alteradas podem renovar após 30 minutos; qualidade no máximo uma vez por anúncio por dia; visitas apenas ao abrir um produto, com cache de 24 horas. Envios terminais não são consultados novamente.
+- SQLite mantém cache em memória do objeto para leituras e listas; gravações idênticas e recriptografia de sessões inalteradas são ignoradas. Reinício recupera os dados persistidos, sem reimportar o catálogo.
+- Falha mantém os dados salvos e recua por uma hora antes de tentar novamente. Limites da conta Cloudflare continuam aplicáveis; esta mudança não aumenta a cota contratada.
+
+Referências: https://developers.cloudflare.com/durable-objects/platform/pricing/ ; https://developers.mercadolivre.com.br/pt_br/gerenciamento-de-vendas ; https://developer.bling.com.br/referencia ; https://www.shopify.com/blog/ecommerce-reporting .

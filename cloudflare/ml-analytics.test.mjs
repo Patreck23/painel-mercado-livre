@@ -27,10 +27,10 @@ test('durable ML sync survives restart, caches API calls, updates cancellation a
   if(path.startsWith('items/visits?')){assert.equal(new URLSearchParams(path.split('?')[1]).get('ids'),'MLB1');return {item_id:'MLB1',total_visits:25};}throw Error('unexpected_request');
  }};
  const range=period(new URLSearchParams({inicio:'2026-11-01',fim:'2026-11-05'}),clock);let a=createMLAnalytics(args);a.get(range,42);
- for(let i=0;i<4;i++){a=createMLAnalytics(args);await a.tick();}
- let result=a.get(range,42);assert.equal(result.job.finished,true);assert.equal(a.view(result.key,result.job).total,20);assert.equal(a.extra(result.key,'MLB1').visits.total,25);const before=calls;
+ for(let i=0;i<12;i++){a=createMLAnalytics(args);await a.tick();}
+ let result=a.get(range,42);assert.equal(result.job.finished,true);assert.equal(a.view(result.key,result.job).total,20);await a.focusVisits(range,'MLB1');assert.equal(a.extra(result.key,'MLB1').visits.total,25);const before=calls;
  a=createMLAnalytics(args);result=a.get(range,42);await a.tick();assert.equal(calls,before);
- clock+=1800000;status='cancelled';price=12;result=a.get(range,42);assert.equal(a.view(result.key,result.job).total,20);for(let i=0;i<4;i++)await a.tick();result=a.get(range,42);assert.equal(a.view(result.key,result.job).total,0);assert.equal(a.extra(result.key,'MLB1').changes[0].label,'Preço');
+ clock+=1800000;status='cancelled';price=12;result=a.get(range,42);assert.equal(a.view(result.key,result.job).total,20);for(let i=0;i<12;i++)await a.tick();result=a.get(range,42);assert.equal(a.view(result.key,result.job).total,0);assert.equal(a.extra(result.key,'MLB1').changes[0].label,'Preço');
 });
 test('API failures preserve previous data and distinguish unavailable quality from a zero score',async()=>{
  const state=memory(),range=period(new URLSearchParams(),now);const a=createMLAnalytics({state,schedule:()=>{},clock:()=>now,read:async()=>{throw Error('ml_read_403');}});a.get(range,1);await a.tick();const result=a.get(range,1);assert.equal(result.job.error,'ml_read_403');assert.equal(result.job.finished,true);
@@ -43,5 +43,5 @@ test('product UI keeps date filters on details, escapes content and never execut
 test('inactive listing sales remain in history while quality and visit API calls are skipped',async()=>{
  const state=memory(),paths=[];const range=period(new URLSearchParams(),now);
  const a=createMLAnalytics({state,schedule:()=>{},clock:()=>now,read:async path=>{paths.push(path);if(path.startsWith('orders/search?'))return {paging:{total:1},results:[{id:1,status:'paid',date_created:'2026-11-05T12:00:00-03:00',currency_id:'BRL',order_items:[{item:{id:'MLB1',title:'Encerrado'},unit_price:10,quantity:1}]}]};if(path.startsWith('users/'))return {paging:{total:0},results:[]};if(path.startsWith('items/bulk?'))return [{status_code:200,body:{id:'MLB1',title:'Encerrado',status:'closed',price:10}}];throw Error('unexpected_request');}});
- a.get(range,42);for(let n=0;n<4;n++)await a.tick();const {key,job}=a.get(range,42);assert.equal(job.finished,true);assert.equal(a.view(key,job).total,10);assert.ok(paths.every(p=>!p.includes('/performance')&&!p.startsWith('items/visits?')));
+ a.get(range,42);for(let n=0;n<12;n++)await a.tick();const {key,job}=a.get(range,42);assert.equal(job.finished,true);assert.equal(a.view(key,job).total,10);assert.ok(paths.every(p=>!p.includes('/performance')&&!p.startsWith('items/visits?')));
 });

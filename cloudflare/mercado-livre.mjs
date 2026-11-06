@@ -1,6 +1,7 @@
 import {createQualityResearch} from './ml-quality.mjs';
 import {createMLAnalytics} from './ml-analytics.mjs';
 import {renderML} from './ml-ui.mjs';
+import {period} from './ml-analytics.mjs';
 import {persistentMap,sealStore} from './state.mjs';
 import {randomBytes,createHash} from 'node:crypto';
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -40,7 +41,8 @@ export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clo
     if(!configured()){send(res,200,wrap(heading+'<article class="card"><h2>Ativar a conexão</h2><p>Cadastre a aplicação na conta Mercado Livre da Casa Nissi e configure as credenciais nos Secrets da Cloudflare.</p><p><a class="button primary" href="https://developers.mercadolivre.com.br/devcenter" target="_blank" rel="noopener noreferrer">Abrir aplicações do Mercado Livre</a></p><p>URL de redirecionamento:</p><code style="overflow-wrap:anywhere">'+esc(redirect)+'</code><p>Secrets na Cloudflare: <strong>ML_CLIENT_ID</strong> e <strong>ML_CLIENT_SECRET</strong>.</p><p class="muted">Use Authorization Code, habilite PKCE e acesso de leitura e offline, quando disponíveis. Após salvar os Secrets e publicar, volte a esta aba para autorizar a conta.</p></article>'));return true;}
     if(!session){send(res,200,wrap(heading+'<article class="card"><h2>Autorizar a Casa Nissi</h2><p>Entre com a conta correta no Mercado Livre e confirme o acesso solicitado pela aplicação.</p>'+button()+'</article>'));return true;}
     let userCache=state.get('ml-user');
-    if(!userCache||clock()-userCache.updated>=1800000){const user=await read('users/me');userCache={user:{id:user.id,nickname:user.nickname,site_id:user.site_id},updated:clock()};state.put('ml-user',userCache);}
+    if(!userCache||clock()-userCache.updated>=86400000){const user=await read('users/me');userCache={user:{id:user.id,nickname:user.nickname,site_id:user.site_id},updated:clock()};state.put('ml-user',userCache);}
+    const focused=url.searchParams.get('produto');if(focused){try{await analytics.focusVisits(period(url.searchParams,clock()),focused);}catch{}}
     const output=renderML({analytics,url,user:userCache.user,clock});
     send(res,200,shell(output.body,{title:'Mercado Livre',active:'ml',refresh:output.refresh}).replace('● Bling conectado','Mercado Livre conectado').replace('Casa Nissi · Bling','Casa Nissi · Mercado Livre'),{'Set-Cookie':cookie(session)});return true;
    }
@@ -59,6 +61,7 @@ export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clo
    send(res,303,'',{Location:'/mercado-livre','Set-Cookie':cookie(session)});return true;
   }catch(error){const code=String(error?.message||'');const safe=/^ml_(token|read)_(\d{3}|network|timeout|io_context|invalid_json)$/.test(code)||code==='ml_invalid_token'?code:'ml_consulta_indisponivel';if(/_(401|400)$/.test(code)){session=null;sessionStore.set(null);}send(res,502,wrap('<h1>Não foi possível concluir a conexão</h1><p>Referência: '+esc(safe)+'</p><p><a class="button" href="/mercado-livre">Voltar à conexão Mercado Livre</a></p>'));return true;}
  };
+ handle.analytics=analytics;handle.connected=()=>!!session;handle.seller=()=>session?.user_id||state.get('ml-user')?.user?.id;handle.user=()=>state.get('ml-user')?.user||null;
  handle.alarm=async()=>{await analytics.tick();await research.tick();};
  return handle;
 }
