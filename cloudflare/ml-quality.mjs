@@ -1,3 +1,4 @@
+import {previousLabel} from './comparison.mjs';
 import {createHash} from 'node:crypto';
 const e=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=n=>Number(n).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
@@ -49,7 +50,7 @@ export function createQualityResearch({state,read,ai,schedule,clock=()=>Date.now
 export function renderQualityDeclines({comparison,research,range,link,photo}){
  const title='<section id="quedas-qualidade" class="ml-panel" style="margin-top:30px"><div class="ml-section" style="margin-top:0"><div><span class="ml-eyebrow">Prioridades · qualidade do anúncio</span><h2 style="font-size:21px;margin-top:9px">10 anúncios que mais perderam qualidade</h2></div><span class="ml-pill warn">'+comparison.total+' quedas confirmadas</span></div><p>Somente anúncios ativos. Comparamos a última nota observada em '+range.previousStart+' a '+range.previousEnd+' com a última nota observada em '+range.start+' a '+range.end+'. A queda é medida em pontos, não em vendas.</p>';
  let body='';
- if(!comparison.rows.length){body='<div class="ml-empty" style="padding:24px">'+(!comparison.compared?'<strong>Estamos formando o histórico de qualidade.</strong><p>Ainda não há notas registradas nos dois períodos para fazer essa comparação. Nenhum anúncio será apontado como queda sem uma nota anterior confirmada.</p>':'<strong>Nenhuma queda confirmada entre os anúncios comparáveis.</strong>')+'</div>';}
+ if(!comparison.rows.length){body='<div class="ml-empty" style="padding:24px">'+(!comparison.compared?'<strong>Estamos formando o histórico de qualidade.</strong><p>Ainda não há notas registradas nos dois períodos para fazer essa comparação. Nenhum anúncio será apontado como queda sem uma nota anterior ('+previousLabel(range)+') confirmada.</p>':'<strong>Nenhuma queda confirmada entre os anúncios comparáveis.</strong>')+'</div>';}
  else body=comparison.rows.map((r,index)=>{const report=research?.report(r);const list=a=>'<ul style="padding-left:18px">'+a.map(t=>'<li>'+e(t)+'</li>').join('')+'</ul>';let analysis='';
   if(report?.status==='ready')analysis='<strong>Hipóteses da IA · não são causas confirmadas</strong>'+list(report.hypotheses)+'<strong>O que verificar primeiro</strong>'+list(report.nextSteps)+'<p>'+e(report.limitations)+'</p>';
   else analysis='<p>'+e(report?.reason||'Pesquisa online e análise de IA aguardando processamento.')+'</p>';

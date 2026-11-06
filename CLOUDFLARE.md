@@ -99,3 +99,8 @@ AI research uses the Cloudflare `AI` binding and `@cf/meta/llama-3.1-8b-instruct
 - Falha mantém os dados salvos e recua por uma hora antes de tentar novamente. Limites da conta Cloudflare continuam aplicáveis; esta mudança não aumenta a cota contratada.
 
 Referências: https://developers.cloudflare.com/durable-objects/platform/pricing/ ; https://developers.mercadolivre.com.br/pt_br/gerenciamento-de-vendas ; https://developer.bling.com.br/referencia ; https://www.shopify.com/blog/ecommerce-reporting .
+
+
+## Cartões de produtos (2.1)
+
+Bling e Mercado Livre preservam os cartões durante sincronização de outro intervalo. O Bling usa o mesmo estilo visual, curva diária, ABC, preço médio e detalhes por canal, sem apresentar qualidade de anúncio como um dado do ERP. Fotos são obtidas do cadastro Bling somente para a página exibida, em lotes de quatro, com cache de sete dias; uma foto já guardada no ML é reutilizada apenas por SKU preenchido idêntico. Cadastros sem foto são identificados. Todas as comparações indicam as datas da base anterior entre parênteses. A política da página permite imagens HTTPS, mantendo o restante das restrições.

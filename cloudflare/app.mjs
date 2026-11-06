@@ -1,3 +1,4 @@
+import {createBlingCards} from './bling-cards.mjs';
 import {renderHome,renderBling,renderMonthly,salesSummary,monthRange,monthlyQuality} from './portal.mjs';
 import {period} from './ml-analytics.mjs';
 import {todayBR,shiftDay} from './sales-cache.mjs';
@@ -16,7 +17,7 @@ const equal = (a, b) => timingSafeEqual(Buffer.from(hash(a)), Buffer.from(hash(b
 const nonce = () => randomBytes(32).toString('base64url');
 const cookieName = '__Host-nissi-oauth';
 const cookie = (value, age=600) => `${cookieName}=${value}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${age}`;
-const headers = {'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Strict-Transport-Security':'max-age=31536000','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://www.bling.com.br https://bling.com.br; frame-ancestors 'none'; base-uri 'none'"};
+const headers = {'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Strict-Transport-Security':'max-age=31536000','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; img-src https:; form-action 'self' https://www.bling.com.br https://bling.com.br; frame-ancestors 'none'; base-uri 'none'"};
 function send(res, code, content, extra={}) {res.writeHead(code, {...headers,'Content-Type':'text/html; charset=utf-8',...extra});res.end(content);}
 const page=body=>shell('<div class="heading"><div><div class="eyebrow">Casa Nissi · integrações</div><h1>Painel Casa Nissi</h1><p class="muted">Produtos, vendas e canais em um só lugar.</p></div></div><article class="card">'+body+'</article>',{title:'Conexões',refresh:0}).replace('● Bling conectado','Conexões da Casa Nissi');
 export function vault(secret) {
@@ -67,6 +68,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
   const channelDirectory=createChannels({request:blingRead,clock});
   const analytics=createPersistentAnalytics({state,schedule,clock,request:blingRead,classifyOrders:cancellation.classify,channels:channelDirectory.get});
 
+  const blingCards=createBlingCards({state,analytics,request:blingRead,schedule,clock});
   function packed(value){return Buffer.from(crypto.encrypt(value),'base64').toString('base64url');}
   function unpack(value){return crypto.decrypt(Buffer.from(value,'base64url').toString('base64'));}
   function oauthCookie(value){return cookie(packed(value));}
@@ -100,7 +102,7 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
       for(const [k,v] of pendingStates)if(v<=clock())pendingStates.delete(k);
       for(const [k,v] of renewals)if(v.until<=clock())renewals.delete(k);
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
-      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'2.0.0-cloudflare'}),{'Content-Type':'application/json'});
+      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'2.1.0-cloudflare'}),{'Content-Type':'application/json'});
       if(!['GET','POST'].includes(req.method))return send(res,405,'Método não permitido',{Allow:'GET, POST'});
       if(await mercadoLivre(req,res,url))return;
       if(['/', '/inicio', '/visao-geral', '/bling', '/mes-anterior'].includes(path)&&req.method==='GET'){
@@ -116,9 +118,9 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
        }
        let body,title,active;
        if(path==='/'||path==='/inicio'||path==='/visao-geral'){body=renderHome({bling:sourceData('bling',dayRange),ml:sourceData('ml',dayRange),now:clock(),connectBling});title='Início';active='overview';}
-       else if(path==='/bling'){if(!sharedSession)return send(res,303,'',{Location:'/'});const range=period(url.searchParams,clock()),data=sourceData('bling',range);body=renderBling({...data,range,url});title='Bling';active='products';}
+       else if(path==='/bling'){if(!sharedSession)return send(res,303,'',{Location:'/'});body=blingCards.render(url).body;title='Bling';active='products';}
        else {const d=new Date(today+'T12:00:00Z');d.setUTCDate(1);d.setUTCMonth(d.getUTCMonth()-1);const month=url.searchParams.get('mes')||d.toISOString().slice(0,7),range=monthRange(month,clock()),source=url.searchParams.get('fonte')==='bling'?'bling':'ml',data=sourceData(source,range);body=renderMonthly({...data,source,month,range,quality:source==='ml'?monthlyQuality(state,range):null});title='Análise do mês anterior';active='monthly';}
-       const syncing=!!state.get('analytics-active')||!!state.get('ml-active');
+       const syncing=!!state.get('analytics-active')||!!state.get('ml-active')||(state.get('bling-photo-queue')||[]).length>0;
        return send(res,200,shell(body,{title,active,refresh:syncing?60:1800}).replace('● Bling conectado','Casa Nissi · dados salvos'),{'Set-Cookie':oauthCookie({kind:'csrf',value:csrf,expires:clock()+600000})});
       }
 
@@ -236,6 +238,6 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
       return send(res,502,page('<p>Referência da consulta: '+safeCode+'</p>'+'<p>Não foi possível concluir a consulta ou autorização. <a href="/">Volte ao início</a> e tente novamente. Se persistir, informe apenas esta mensagem; não compartilhe códigos nem chaves.</p>'));
     }
   };
-  handler.alarm=async()=>{await mercadoLivre.alarm();await analytics.tick();};
+  handler.alarm=async()=>{await mercadoLivre.alarm();await analytics.tick();await blingCards.tick();};
   return handler;
 }
