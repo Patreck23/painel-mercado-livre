@@ -51,7 +51,7 @@ A aba Mercado Livre confirma a conta autorizada por `/users/me`. As análises es
 
 ## Verificar antes de aposentar o Render
 
-1. `/health` deve mostrar `2.0.0-cloudflare`.
+1. `/health` deve mostrar `2.2.0-cloudflare`.
 2. Confira o apelido da conta após autorizar Mercado Livre.
 3. Confira as vendas e cancelados do mesmo período no Bling.
 4. Abra o painel em outro navegador para confirmar o acesso compartilhado.
@@ -104,3 +104,20 @@ Referências: https://developers.cloudflare.com/durable-objects/platform/pricing
 ## Cartões de produtos (2.1)
 
 Bling e Mercado Livre preservam os cartões durante sincronização de outro intervalo. O Bling usa o mesmo estilo visual, curva diária, ABC, preço médio e detalhes por canal, sem apresentar qualidade de anúncio como um dado do ERP. Fotos são obtidas do cadastro Bling somente para a página exibida, em lotes de quatro, com cache de sete dias; uma foto já guardada no ML é reutilizada apenas por SKU preenchido idêntico. Cadastros sem foto são identificados. Todas as comparações indicam as datas da base anterior entre parênteses. A política da página permite imagens HTTPS, mantendo o restante das restrições.
+
+
+## Fechamento e atualização manual (2.2)
+
+A tela mensal usa pedidos canônicos do mês escolhido, sem reutilizar a janela de outro trabalho ativo. A primeira abertura agenda uma auditoria paginada das duas fontes e dos cancelamentos, preserva os pedidos existentes e completa somente detalhes financeiros ausentes ou alterados. Não reimporta catálogo ou qualidade de todos os anúncios. A conferência é retomada em lotes após reinício; enquanto incompleta, nenhum selo apresenta a base como conciliada.
+
+As referências `numeroLoja` são associadas aos IDs de pedidos ou packs do ML. Agrupamentos não duplicam valores. Datas fora do mês, referências duplicadas e situação paga versus cancelada são identificadas, sem atribuir uma causa não confirmada. Dados fiscais, devoluções parciais e extrato de liquidação não são conciliados por este relatório.
+
+Visitas são consultadas no endpoint agregado do vendedor para os dois meses e em até doze anúncios de destaque. Valores ausentes permanecem indisponíveis. A razão compras agrupadas por pacote / visitas é calculada pelo painel, não anunciada como a conversão oficial do ML. Notas de qualidade históricas exigem observações gravadas no período.
+
+Frete por envio usa `/shipments/{id}/costs`: `receiver.cost` para comprador e `senders[].cost` para o vendedor autenticado. Cada shipment conta uma vez. Pacotes cruzando meses ou com vários vendedores não recebem rateio arbitrário de frete do comprador. Tarifas `sale_fee` são por unidade; ausência não vira zero.
+
+Todas as telas principais mostram a última sincronização de pedidos e um formulário **Atualizar agora** com ticket assinado, retorno restrito à própria origem e proteção contra acionamento cruzado. Ele agenda mudanças desde o cursor salvo; não apaga dados e não duplica trabalho ativo. Cliques são limitados a um por minuto por fonte. A atualização automática de 30 minutos é acionada durante o uso, inclusive em consultas de meses fechados.
+
+O menu passa a duas colunas no celular; cartões de valores e produtos ficam em uma coluna nas telas pequenas. Filtros e botão de atualização ocupam a largura disponível, fontes de formulário evitam zoom automático e os demais destaques podem ser expandidos em Ver mais.
+
+Referências: https://developers.mercadolivre.com.br/pt_br/como-comecar/recurso-visits ; https://developers.mercadolivre.com.br/pt_br/gerenciamento-de-envios ; https://vendedores.mercadolivre.com.br/nota/secao-de-metricas-de-negocio?guideKeyId=GE33 .

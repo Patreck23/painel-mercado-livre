@@ -61,7 +61,7 @@ export function createMercadoLivre({env,base,crypto,send,shell,fetcher=fetch,clo
    send(res,303,'',{Location:'/mercado-livre','Set-Cookie':cookie(session)});return true;
   }catch(error){const code=String(error?.message||'');const safe=/^ml_(token|read)_(\d{3}|network|timeout|io_context|invalid_json)$/.test(code)||code==='ml_invalid_token'?code:'ml_consulta_indisponivel';if(/_(401|400)$/.test(code)){session=null;sessionStore.set(null);}send(res,502,wrap('<h1>Não foi possível concluir a conexão</h1><p>Referência: '+esc(safe)+'</p><p><a class="button" href="/mercado-livre">Voltar à conexão Mercado Livre</a></p>'));return true;}
  };
- handle.analytics=analytics;handle.connected=()=>!!session;handle.seller=()=>session?.user_id||state.get('ml-user')?.user?.id;handle.user=()=>state.get('ml-user')?.user||null;
+ handle.read=read;handle.analytics=analytics;handle.connected=()=>!!session;handle.seller=()=>session?.user_id||state.get('ml-user')?.user?.id;handle.user=()=>state.get('ml-user')?.user||null;
  handle.alarm=async()=>{await analytics.tick();await research.tick();};
  return handle;
 }

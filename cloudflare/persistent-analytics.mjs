@@ -42,10 +42,10 @@ export function createPersistentAnalytics({state,schedule,request,classifyOrders
      if(!cached||cached.fingerprint!==fingerprint||m.mode==='delta'&&cached.updated<m.syncFrom){const v=await request('pedidos/vendas/'+encodeURIComponent(id));if(!v.data||!Array.isArray(v.data.itens))throw Error('missing_items');const order=normalize(v.data);order.cancelled=status.get(String(order.status))?.cancelled===true;cached={order,updated:clock(),fingerprint};state.put(cacheKey,cached);}
      m.cursor++;m.processed=m.cursor;
     }
-    if(m.cursor>=m.pending.length){for(const span of m.segments)if(m.listComplete)addCoverage(state,'bling',span.start,span.end);state.put('bling-sync-since',m.syncTo);m.finished=true;m.phase='Dados salvos · atualização incremental concluída';m.completedAt=clock();}
+    if(m.cursor>=m.pending.length){for(const span of m.segments)if(m.listComplete)addCoverage(state,'bling',span.start,span.end);state.put('bling-sync-since',m.syncTo);m.finished=true;m.phase='Dados salvos · atualização incremental concluída';m.completedAt=clock();state.put('bling-last-completed',clock());}
    }else {m.finished=true;m.phase='Dados anteriores preservados';}
   }catch(error){m.error=true;m.finished=true;const code=String(error?.message||'');m.errorCode=/^(token_exchange_failed|bling_read_failed)_\d{3}$/.test(code)||/^bling_(token|read)_(io_context|timeout|network|invalid_json|invalid_payload)$/.test(code)||['invalid_list','missing_items','not_connected'].includes(code)?code:'consulta_indisponivel';m.phase='Atualização pausada. Os dados já salvos continuam disponíveis.';}
   m.updated=clock();state.put(metaKey(key),m);if(!m.finished)schedule(clock()+5000);else state.delete('analytics-active');
  }
- return {get,orders:allOrders,async tick(){if(running){schedule(clock()+5000);return;}running=true;try{await run();}finally{running=false;}},reset(){state.delete('analytics-active');}};
+ return {get,force(range){const active=state.get('analytics-active');if(active){const m=state.get(metaKey(active));if(m&&!m.finished)return false;state.delete('analytics-active');}const k=range.start+':'+range.end,m=state.get(metaKey(k));if(m)state.put(metaKey(k),{...m,updated:0,error:false});get(range);return true;},orders:allOrders,async tick(){if(running){schedule(clock()+5000);return;}running=true;try{await run();}finally{running=false;}},reset(){state.delete('analytics-active');}};
 }

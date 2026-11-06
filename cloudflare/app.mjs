@@ -1,3 +1,5 @@
+import {createMonthClose} from './month-close.mjs';
+import {closeModel,renderClose} from './monthly-ui.mjs';
 import {createBlingCards} from './bling-cards.mjs';
 import {renderHome,renderBling,renderMonthly,salesSummary,monthRange,monthlyQuality} from './portal.mjs';
 import {period} from './ml-analytics.mjs';
@@ -69,6 +71,12 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
   const analytics=createPersistentAnalytics({state,schedule,clock,request:blingRead,classifyOrders:cancellation.classify,channels:channelDirectory.get});
 
   const blingCards=createBlingCards({state,analytics,request:blingRead,schedule,clock});
+  const monthly=createMonthClose({state,bling:analytics,ml:mercadoLivre.analytics,blingRead,mlRead:mercadoLivre.read,classify:cancellation.classify,seller:mercadoLivre.seller,connected:source=>source==='bling'?!!sharedSession:mercadoLivre.connected(),schedule,clock});
+  const dashboardPaths=new Set(['/','/inicio','/visao-geral','/bling','/mercado-livre','/mes-anterior','/analises']);
+  function ordinaryPending(){const a=state.get('analytics-active'),b=state.get('ml-active'),am=a&&state.get('analytics:'+a+':meta'),bm=b&&state.get(b+'meta');if(a&&(!am||am.finished))state.delete('analytics-active');if(b&&(!bm||bm.finished))state.delete('ml-active');return !!(am&&!am.finished||bm&&!bm.finished||(state.get('bling-photo-queue')||[]).length);}
+  const currentRange=()=>{const today=todayBR(clock());return {start:today,end:today,previousStart:shiftDay(today,-1),previousEnd:shiftDay(today,-1),days:1};};
+  function refreshSources(sources,manual=false){for(const source of sources){if(!(source==='bling'?sharedSession:mercadoLivre.connected()))continue;const k=(manual?'manual-refresh:':'auto-refresh:')+source,ttl=manual?60000:1800000;if(clock()-(state.get(k)||0)<ttl)continue;state.put(k,clock());if(source==='bling')analytics.force(currentRange());else mercadoLivre.analytics.force(currentRange(),mercadoLivre.seller());}}
+
   function packed(value){return Buffer.from(crypto.encrypt(value),'base64').toString('base64url');}
   function unpack(value){return crypto.decrypt(Buffer.from(value,'base64url').toString('base64'));}
   function oauthCookie(value){return cookie(packed(value));}
@@ -102,8 +110,16 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
       for(const [k,v] of pendingStates)if(v<=clock())pendingStates.delete(k);
       for(const [k,v] of renewals)if(v.until<=clock())renewals.delete(k);
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
-      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'2.1.0-cloudflare'}),{'Content-Type':'application/json'});
+      if(path==='/health'&&['GET','HEAD'].includes(req.method))return send(res,200,req.method==='HEAD'?'':JSON.stringify({service:'casa-nissi-bling',status:'ok',version:'2.2.0-cloudflare'}),{'Content-Type':'application/json'});
       if(!['GET','POST'].includes(req.method))return send(res,405,'Método não permitido',{Allow:'GET, POST'});
+      if(path==='/atualizar'&&req.method==='POST'){
+       if(req.headers['sec-fetch-site']==='cross-site')return send(res,403,'Abra o painel diretamente para atualizar.');
+       let body='';for await(const chunk of req){body+=chunk;if(body.length>8192)return send(res,413,'Solicitação muito grande');}const params=new URLSearchParams(body);let ticket;try{ticket=unpack(params.get('ticket')||'');}catch{}if(!ticket||ticket.kind!=='refresh'||ticket.expires<clock())return send(res,303,'',{Location:'/'});
+       let target;try{target=new URL(params.get('return')||'/',base);}catch{target=new URL('/',base);}if(target.origin!==new URL(base).origin||!dashboardPaths.has(target.pathname))target=new URL('/',base);
+       if(target.pathname==='/mes-anterior')monthly.resume(target.searchParams.get('mes')||shiftDay(todayBR(clock()).slice(0,7)+'-01',-1).slice(0,7));
+       refreshSources(target.pathname==='/bling'?['bling']:target.pathname==='/mercado-livre'?['ml']:['bling','ml'],true);return send(res,303,'',{Location:target.pathname+target.search});
+      }
+      if(req.method==='GET'&&dashboardPaths.has(path))refreshSources(path==='/bling'?['bling']:path==='/mercado-livre'?['ml']:['bling','ml']);
       if(await mercadoLivre(req,res,url))return;
       if(['/', '/inicio', '/visao-geral', '/bling', '/mes-anterior'].includes(path)&&req.method==='GET'){
        const csrf=packed({kind:'csrf',value:nonce(),expires:clock()+600000}),connectBling='/auth/bling/start?ticket='+csrf;
@@ -114,13 +130,13 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
         const connected=source==='ml'?mercadoLivre.connected():!!sharedSession;
         if(!connected)return {connected:false,summary:salesSummary(source,[],range),job:null};
         if(source==='ml'){const result=ml.get(range,mercadoLivre.seller());const job=result.job,orders=ml.orders();return {connected:true,job,summary:salesSummary('ml',orders,range,{shipping:ml.shippingInfo})};}
-        const result=analytics.get(range),job=result.job||result.active;return {connected:true,job,summary:salesSummary('bling',job?.orders||[],range,{statuses:job?.statuses||new Map()})};
+        const result=analytics.get(range),job=result.job||result.active;return {connected:true,job,summary:salesSummary('bling',analytics.orders(),range,{statuses:new Map(state.get('bling-statuses')||[])})};
        }
        let body,title,active;
        if(path==='/'||path==='/inicio'||path==='/visao-geral'){body=renderHome({bling:sourceData('bling',dayRange),ml:sourceData('ml',dayRange),now:clock(),connectBling});title='Início';active='overview';}
        else if(path==='/bling'){if(!sharedSession)return send(res,303,'',{Location:'/'});body=blingCards.render(url).body;title='Bling';active='products';}
-       else {const d=new Date(today+'T12:00:00Z');d.setUTCDate(1);d.setUTCMonth(d.getUTCMonth()-1);const month=url.searchParams.get('mes')||d.toISOString().slice(0,7),range=monthRange(month,clock()),source=url.searchParams.get('fonte')==='bling'?'bling':'ml',data=sourceData(source,range);body=renderMonthly({...data,source,month,range,quality:source==='ml'?monthlyQuality(state,range):null});title='Análise do mês anterior';active='monthly';}
-       const syncing=!!state.get('analytics-active')||!!state.get('ml-active')||(state.get('bling-photo-queue')||[]).length>0;
+       else {const d=new Date(today+'T12:00:00Z');d.setUTCDate(1);d.setUTCMonth(d.getUTCMonth()-1);const month=url.searchParams.get('mes')||d.toISOString().slice(0,7),range=monthRange(month,clock()),source=url.searchParams.get('fonte')==='bling'?'bling':'ml',audit=monthly.get(month,range),model=closeModel({state,manager:monthly,audit,range,source,month,seller:mercadoLivre.seller()});if(source==='bling')blingCards.preparePhotos([...model.best,...model.falls].map(p=>({key:p.id,sku:p.sku})));body=renderClose(model);title='Análise do mês anterior';active='monthly';}
+       const syncing=!!state.get('analytics-active')||!!state.get('ml-active')||(state.get('bling-photo-queue')||[]).length>0||monthly.pending();
        return send(res,200,shell(body,{title,active,refresh:syncing?60:1800}).replace('● Bling conectado','Casa Nissi · dados salvos'),{'Set-Cookie':oauthCookie({kind:'csrf',value:csrf,expires:clock()+600000})});
       }
 
@@ -238,6 +254,14 @@ export function createApp({env=process.env,fetcher:transport=fetch,clock=()=>Dat
       return send(res,502,page('<p>Referência da consulta: '+safeCode+'</p>'+'<p>Não foi possível concluir a consulta ou autorização. <a href="/">Volte ao início</a> e tente novamente. Se persistir, informe apenas esta mensagem; não compartilhe códigos nem chaves.</p>'));
     }
   };
-  handler.alarm=async()=>{await mercadoLivre.alarm();await analytics.tick();await blingCards.tick();};
-  return handler;
+  let monthlyTurn=true;
+  const wrapped=async(req,res)=>{let status=200;return handler(req,{writeHead(code,h){status=code;res.writeHead(code,h);},end(value=''){
+   if(status===200&&typeof value==='string'&&value.includes('<main class="content">')&&dashboardPaths.has(new URL(req.url,base).pathname)){
+    const current=new URL(req.url,base),format=t=>t?new Date(t).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'}):'aguardando primeira sincronização',month=current.searchParams.get('mes')||'',audit=month?state.get('month-close:'+month):null,b=audit?.blingChecked||state.get('bling-last-completed')||state.get('bling-sync-since'),m=audit?.mlChecked||state.get('ml-last-completed')||state.get('ml-sync-since'),busy=!!state.get('analytics-active')||!!state.get('ml-active')||monthly.pending(),ticket=packed({kind:'refresh',expires:clock()+7200000,value:nonce()});
+    const toolbar='<section class="sync-toolbar" style="display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;background:white;border:1px solid #dfe5ed;border-radius:12px;padding:18px;margin-bottom:24px"><div class="sync-copy" style="font-size:12px;line-height:1.8"><strong>Última sincronização de pedidos · horário de Brasília</strong><br>Bling: '+escape(format(b))+' · Mercado Livre: '+escape(format(m))+'<br><span style="color:#758398">Atualização automática a cada 30 minutos durante o uso. '+(busy?'Atualização em andamento; os dados salvos continuam visíveis.':'Dados salvos preservados.')+'</span></div><form method="post" action="/atualizar"><input type="hidden" name="ticket" value="'+escape(ticket)+'"><input type="hidden" name="return" value="'+escape(current.pathname+current.search)+'"><button style="background:#f5cb22;color:#172438;border:0;border-radius:9px;padding:17px 26px;font-size:16px;font-weight:800;cursor:pointer">↻ Atualizar agora</button></form></section>';
+    value=value.replace('<main class="content">','<main class="content">'+toolbar);
+   }res.end(value);
+  }});};
+  wrapped.alarm=async()=>{const ordinary=ordinaryPending();if(monthly.pending()&&(monthlyTurn||!ordinary)){monthlyTurn=false;await monthly.tick();}else{monthlyTurn=true;await mercadoLivre.alarm();await analytics.tick();await blingCards.tick();}if(monthly.pending()||ordinaryPending())schedule(clock()+5000);};
+  return wrapped;
 }
